@@ -1,0 +1,9 @@
+{
+  "name": "whatsapp-forensics",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "node --test",
+    "test:coverage": "node --experimental-test-coverage --test"
+  }
+}

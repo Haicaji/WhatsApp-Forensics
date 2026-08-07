@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self' blob: data:; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#161717" />
+    <title>ShowMesssage · WhatsApp 聊天记录查看器</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script defer src="vendor/jszip.min.js"></script>
+    <script defer src="parser.js"></script>
+    <script defer src="datetime.js"></script>
+    <script defer src="app.js"></script>
+  </head>
+  <body>
+    <div id="app" class="app-shell" aria-busy="false">
+      <nav class="nav-rail" aria-label="主导航">
+        <div class="nav-primary">
+          <button id="chatNavButton" class="nav-button is-selected" type="button" aria-label="对话" aria-current="page" data-tooltip="对话">
+            <svg class="icon" aria-hidden="true"><use href="#icon-chat"></use></svg>
+          </button>
+          <button class="nav-button" type="button" aria-label="通话" aria-disabled="true" data-offline data-tooltip="通话 · 离线 ZIP 不支持">
+            <svg class="icon" aria-hidden="true"><use href="#icon-calls"></use></svg>
+          </button>
+          <button class="nav-button" type="button" aria-label="动态" aria-disabled="true" data-offline data-tooltip="动态 · 离线 ZIP 不支持">
+            <svg class="icon" aria-hidden="true"><use href="#icon-status"></use></svg>
+          </button>
+          <button class="nav-button" type="button" aria-label="频道" aria-disabled="true" data-offline data-tooltip="频道 · 离线 ZIP 不支持">
+            <svg class="icon" aria-hidden="true"><use href="#icon-channel"></use></svg>
+          </button>
+          <button class="nav-button" type="button" aria-label="社群" aria-disabled="true" data-offline data-tooltip="社群 · 离线 ZIP 不支持">
+            <svg class="icon" aria-hidden="true"><use href="#icon-community"></use></svg>
+          </button>
+        </div>
+
+        <div class="nav-footer">
+          <button id="mediaLibraryButton" class="nav-button" type="button" aria-label="影音内容" aria-disabled="true" data-tooltip="载入 ZIP 后查看影音内容">
+            <svg class="icon" aria-hidden="true"><use href="#icon-media-library"></use></svg>
+          </button>
+          <button id="profileButton" class="nav-button profile-dot" type="button" aria-label="自己" aria-disabled="true" data-tooltip="载入 ZIP 后查看当前用户">
+            <svg class="icon" aria-hidden="true"><use href="#icon-user"></use></svg>
+          </button>
+        </div>
+      </nav>
+
+      <aside id="chatDrawer" class="chat-drawer" aria-label="会话列表">
+        <header class="chat-list-header">
+          <div class="wordmark">WhatsApp</div>
+          <div class="header-actions">
+            <button id="headerOpenButton" class="icon-button" type="button" aria-label="打开新的 ZIP" title="打开新的 ZIP">
+              <svg class="icon" aria-hidden="true"><use href="#icon-folder-plus"></use></svg>
+            </button>
+            <button id="archiveInfoButton" class="icon-button" type="button" aria-label="ZIP 文件信息" disabled data-tooltip="载入 ZIP 后查看文件信息">
+              <svg class="icon" aria-hidden="true"><use href="#icon-info"></use></svg>
+            </button>
+            <button id="mobileSettingsButton" class="icon-button header-settings-action" type="button" aria-label="设置" title="设置">
+              <svg class="icon" aria-hidden="true"><use href="#icon-settings"></use></svg>
+            </button>
+            <button class="icon-button" type="button" aria-label="更多选项" aria-disabled="true" data-offline data-tooltip="只读模式下不可用">
+              <svg class="icon" aria-hidden="true"><use href="#icon-more"></use></svg>
+            </button>
+          </div>
+        </header>
+
+        <div class="search-row">
+          <label class="search-box" for="chatSearch">
+            <svg class="icon search-icon" aria-hidden="true"><use href="#icon-search"></use></svg>
+            <input id="chatSearch" type="search" placeholder="搜索或开始新聊天" autocomplete="off" disabled />
+          </label>
+        </div>
+
+        <div id="filterRow" class="filter-row" role="tablist" aria-label="会话筛选">
+          <button class="filter-chip is-active" type="button" role="tab" aria-selected="true" data-filter="all">全部</button>
+          <button class="filter-chip" type="button" role="tab" aria-selected="false" data-filter="unread">未读</button>
+          <button class="filter-chip" type="button" role="tab" aria-selected="false" data-filter="favorites">星标消息</button>
+          <button class="filter-chip" type="button" role="tab" aria-selected="false" data-filter="groups">群组</button>
+        </div>
+
+        <div class="chat-list-scroll">
+          <div id="chatList" class="chat-list" role="listbox" aria-label="聊天"></div>
+          <div id="chatListEmpty" class="chat-list-empty" hidden>
+            <p>没有找到任何对话、联系人或消息</p>
+            <button id="emptyResetButton" class="text-button" type="button">清除搜索和筛选</button>
+          </div>
+        </div>
+
+        <div class="drawer-security">
+          <div class="offline-state">
+            <svg class="mini-icon" aria-hidden="true"><use href="#icon-info"></use></svg>
+            <span>该页面仅为提取出数据的静态展示，并非原始 WhatsApp 网页镜像</span>
+          </div>
+        </div>
+
+        <section id="profileView" class="profile-view" hidden aria-labelledby="profileViewTitle">
+          <header class="profile-view-header">
+            <button id="profileBackButton" class="icon-button" type="button" aria-label="返回对话">
+              <svg class="icon" aria-hidden="true"><use href="#icon-back"></use></svg>
+            </button>
+            <h2 id="profileViewTitle">个人主页</h2>
+          </header>
+          <div id="profileViewContent" class="profile-view-content"></div>
+        </section>
+
+        <section id="settingsView" class="profile-view settings-view" hidden aria-labelledby="settingsViewTitle">
+          <header class="profile-view-header">
+            <button id="settingsBackButton" class="icon-button" type="button" aria-label="返回对话">
+              <svg class="icon" aria-hidden="true"><use href="#icon-back"></use></svg>
+            </button>
+            <h2 id="settingsViewTitle">设置</h2>
+          </header>
+          <div id="settingsViewContent" class="profile-view-content settings-view-content"></div>
+        </section>
+      </aside>
+
+      <main id="conversationPanel" class="conversation-panel">
+        <section id="welcomePanel" class="welcome-panel" aria-label="未选择聊天记录"></section>
+
+        <section id="conversationView" class="conversation-view" hidden aria-label="聊天内容">
+          <header class="conversation-header">
+            <button id="backToChats" class="icon-button back-button" type="button" aria-label="返回会话列表">
+              <svg class="icon" aria-hidden="true"><use href="#icon-back"></use></svg>
+            </button>
+            <button id="conversationAvatar" class="avatar avatar-small avatar-button" type="button" aria-label="查看联系人信息"></button>
+            <div class="conversation-heading">
+              <h2 id="conversationTitle"></h2>
+              <p id="conversationSubtitle"></p>
+            </div>
+            <div class="conversation-actions">
+              <button class="icon-button desktop-call-action" type="button" aria-label="视频通话" aria-disabled="true" data-offline data-tooltip="视频通话 · 离线 ZIP 不支持">
+                <svg class="icon" aria-hidden="true"><use href="#icon-video-call"></use></svg>
+              </button>
+              <button class="icon-button desktop-call-action" type="button" aria-label="语音通话" aria-disabled="true" data-offline data-tooltip="语音通话 · 离线 ZIP 不支持">
+                <svg class="icon" aria-hidden="true"><use href="#icon-phone"></use></svg>
+              </button>
+              <button id="conversationSearchButton" class="icon-button" type="button" aria-label="在会话中搜索">
+                <svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg>
+              </button>
+              <button class="icon-button" type="button" aria-label="更多选项" aria-disabled="true" data-offline data-tooltip="只读模式下不可用">
+                <svg class="icon" aria-hidden="true"><use href="#icon-more"></use></svg>
+              </button>
+            </div>
+          </header>
+
+          <div id="messagesBody" class="messages-body">
+            <div class="wallpaper" aria-hidden="true"></div>
+            <div id="messageList" class="message-list" role="log" aria-live="off"></div>
+            <div id="floatingDate" class="floating-date" aria-hidden="true" hidden></div>
+          </div>
+
+          <footer class="compose-box" aria-label="只读模式">
+            <button class="icon-button compose-action" type="button" aria-label="添加附件（只读模式不可用）" disabled>
+              <svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg>
+            </button>
+            <div class="compose-input" aria-disabled="true">只读查看器，无法发送消息</div>
+            <button class="icon-button compose-action" type="button" aria-label="语音消息（只读模式不可用）" disabled>
+              <svg class="icon" aria-hidden="true"><use href="#icon-mic"></use></svg>
+            </button>
+          </footer>
+        </section>
+
+        <aside id="detailPanel" class="detail-panel" hidden aria-labelledby="detailPanelTitle">
+          <header class="detail-panel-header">
+            <button id="detailPanelClose" class="icon-button" type="button" aria-label="关闭">
+              <svg class="icon" aria-hidden="true"><use href="#icon-close"></use></svg>
+            </button>
+            <h2 id="detailPanelTitle"></h2>
+          </header>
+          <div id="detailPanelContent" class="detail-panel-content"></div>
+        </aside>
+      </main>
+    </div>
+
+    <input id="zipInput" class="visually-hidden" type="file" accept=".zip,application/zip,application/x-zip-compressed" />
+
+    <div id="dropOverlay" class="drop-overlay" hidden>
+      <div class="drop-card">
+        <svg class="drop-icon" aria-hidden="true"><use href="#icon-folder-plus"></use></svg>
+        <strong>松开以打开聊天记录</strong>
+        <span>仅接受 ZAPiXWEB ZIP</span>
+      </div>
+    </div>
+
+    <div id="loadingOverlay" class="loading-overlay" hidden role="status" aria-live="polite">
+      <div class="loading-card">
+        <div class="loading-mark">
+          <svg aria-hidden="true"><use href="#icon-whatsapp"></use></svg>
+        </div>
+        <strong id="loadingTitle">正在读取 ZIP…</strong>
+        <div class="progress-track" aria-hidden="true"><span id="loadingProgress"></span></div>
+        <span id="loadingDetail">所有数据都留在本机</span>
+      </div>
+    </div>
+
+    <dialog id="mediaDialog" class="media-dialog" aria-labelledby="mediaDialogTitle" aria-describedby="mediaDialogMeta">
+      <div class="media-dialog-header">
+        <div class="media-dialog-title-group">
+          <strong id="mediaDialogTitle">媒体预览</strong>
+          <div class="media-dialog-subline">
+            <span id="mediaDialogMeta"></span>
+            <span id="mediaDialogCounter" class="media-dialog-counter" aria-live="polite"></span>
+          </div>
+        </div>
+        <div class="media-dialog-actions">
+          <button id="mediaDownloadButton" class="icon-button" type="button" aria-label="下载文件" title="下载">
+            <svg class="icon" aria-hidden="true"><use href="#icon-download"></use></svg>
+          </button>
+          <button id="mediaCloseButton" class="icon-button" type="button" aria-label="关闭预览" title="关闭">
+            <svg class="icon" aria-hidden="true"><use href="#icon-close"></use></svg>
+          </button>
+        </div>
+      </div>
+      <button id="mediaPreviousButton" class="media-dialog-nav is-previous" type="button" aria-label="查看上一个媒体" title="上一个（左方向键）" hidden>
+        <svg class="icon" aria-hidden="true"><use href="#icon-chevron-left"></use></svg>
+      </button>
+      <div id="mediaDialogContent" class="media-dialog-content"></div>
+      <button id="mediaNextButton" class="media-dialog-nav is-next" type="button" aria-label="查看下一个媒体" title="下一个（右方向键）" hidden>
+        <svg class="icon" aria-hidden="true"><use href="#icon-chevron-right"></use></svg>
+      </button>
+    </dialog>
+
+    <dialog id="libraryDialog" class="library-dialog" aria-labelledby="libraryDialogTitle">
+      <header class="library-dialog-header">
+        <div>
+          <strong id="libraryDialogTitle">影音内容</strong>
+          <span id="libraryDialogSubtitle">所有聊天中的影音内容</span>
+        </div>
+        <button id="libraryDialogClose" class="icon-button" type="button" aria-label="关闭影音内容">
+          <svg class="icon" aria-hidden="true"><use href="#icon-close"></use></svg>
+        </button>
+      </header>
+      <div id="libraryTabs" class="library-tabs" role="tablist" aria-label="附件类型">
+        <button id="libraryTabMedia" class="library-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="libraryDialogContent" data-library-tab="media">影音内容</button>
+        <button id="libraryTabDocuments" class="library-tab" type="button" role="tab" aria-selected="false" aria-controls="libraryDialogContent" data-library-tab="documents" tabindex="-1">文档</button>
+        <button id="libraryTabLinks" class="library-tab" type="button" role="tab" aria-selected="false" aria-controls="libraryDialogContent" data-library-tab="links" tabindex="-1">链接</button>
+      </div>
+      <div id="libraryDialogContent" class="library-dialog-content" role="tabpanel" aria-labelledby="libraryTabMedia"></div>
+    </dialog>
+
+    <dialog id="archiveInfoDialog" class="archive-info-dialog" aria-labelledby="archiveInfoDialogTitle">
+      <header class="archive-info-dialog-header">
+        <div>
+          <strong id="archiveInfoDialogTitle">ZIP 文件信息</strong>
+          <span>提取包与本地查看器元数据</span>
+        </div>
+        <button id="archiveInfoDialogClose" class="icon-button" type="button" aria-label="关闭 ZIP 文件信息">
+          <svg class="icon" aria-hidden="true"><use href="#icon-close"></use></svg>
+        </button>
+      </header>
+      <div id="archiveInfoDialogContent" class="archive-info-dialog-content"></div>
+    </dialog>
+
+    <div id="toast" class="toast" hidden role="alert"></div>
+
+    <svg class="svg-sprite" aria-hidden="true" focusable="false">
+      <symbol id="icon-whatsapp" viewBox="0 0 32 32">
+        <path d="M16 3.5a11.9 11.9 0 0 0-10.2 18l-1.6 6 6.1-1.6A11.9 11.9 0 1 0 16 3.5Z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round" />
+        <path d="M12.1 9.8c.3-.7.7-.7 1.1-.7h.5c.2 0 .5.1.7.6l1 2.4c.1.4.1.7-.2 1l-.8.9c-.2.2-.3.4-.1.8.5 1 1.2 1.8 2.1 2.5.8.6 1.7 1.1 2.7 1.4.3.1.5 0 .7-.2l1.1-1.3c.3-.3.6-.4 1-.2l2.4 1.1c.4.2.6.4.6.7 0 .5-.2 1.7-.8 2.4-.7.8-1.7 1.2-2.8 1.2-1.2 0-3.3-.7-5.6-2.1a15.6 15.6 0 0 1-5.3-5.1c-.8-1.3-1.2-2.6-1.2-3.6 0-1 .4-1.8.8-2.3l.3-.5Z" fill="currentColor" />
+      </symbol>
+      <symbol id="icon-chat" viewBox="0 0 24 24"><path d="M4 5.5h16v12.8H8.2L4 21V5.5Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 10h8M8 14h5.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+      <symbol id="icon-calls" viewBox="0 0 24 24"><path d="M7.1 3.8 10 7.4 8.2 9.2c1.2 2.6 3 4.4 5.6 5.6l1.8-1.8 3.6 2.9-.8 3.4c-.2.8-.9 1.3-1.7 1.3C9.4 20.6 3.4 14.6 3.4 7.3c0-.8.5-1.5 1.3-1.7l2.4-.6Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M14.5 4.5h5v5M19.2 4.8l-4.3 4.3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="icon-status" viewBox="0 0 24 24"><path d="M4.7 7.4A8.6 8.6 0 0 1 7.5 4.7M4 12a8 8 0 0 0 8 8m4.6-.7A8.5 8.5 0 0 0 19.3 16M20 12a8 8 0 0 0-8-8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="12" r="3.4" fill="currentColor"/></symbol>
+      <symbol id="icon-channel" viewBox="0 0 24 24"><path d="M6 8.5h8.5a3.5 3.5 0 1 1 0 7H6a3.5 3.5 0 1 1 0-7Zm11.5-3v13M9 5v3.5M9 15.5V19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+      <symbol id="icon-community" viewBox="0 0 24 24"><circle cx="8" cy="9" r="3" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="17" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M2.8 19c.5-3.2 2.2-5 5.2-5s4.7 1.8 5.2 5M14.1 15c.8-.8 1.7-1.2 2.9-1.2 2.3 0 3.7 1.5 4.1 4.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+      <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3.5 6.5h6l2 2h9v9.8a1.7 1.7 0 0 1-1.7 1.7H5.2a1.7 1.7 0 0 1-1.7-1.7V6.5Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M3.5 9h17" stroke="currentColor" stroke-width="1.8"/></symbol>
+      <symbol id="icon-folder-plus" viewBox="0 0 24 24"><path d="M3.5 6.5h6l2 2h9v9.8a1.7 1.7 0 0 1-1.7 1.7H5.2a1.7 1.7 0 0 1-1.7-1.7V6.5Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 14.5h6M12 11.5v6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+      <symbol id="icon-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 10.5v6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="7.2" r="1.1" fill="currentColor"/></symbol>
+      <symbol id="icon-settings" viewBox="-2 -2 28 28"><path d="M9.6 3.8 10.2 2h3.6l.6 1.8 1.8.8 1.8-.8 2.5 2.5-.8 1.8.8 1.8 1.8.6v3.6l-1.8.6-.8 1.8.8 1.8-2.5 2.5-1.8-.8-1.8.8-.6 1.8h-3.6l-.6-1.8-1.8-.8-1.8.8-2.5-2.5.8-1.8-.8-1.8-1.8-.6v-3.6l1.8-.6.8-1.8-.8-1.8 2.5-2.5 1.8.8 1.8-.8Z" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linejoin="round"/><circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.7"/></symbol>
+      <symbol id="icon-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v5l3.5 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M18.7 5.3l-1.4 1.4M6.7 17.3l-1.4 1.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+      <symbol id="icon-moon" viewBox="0 0 24 24"><path d="M20.4 15.2A8.7 8.7 0 0 1 8.8 3.6a8.7 8.7 0 1 0 11.6 11.6Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+      <symbol id="icon-user" viewBox="0 0 24 24"><circle cx="12" cy="8.5" r="3.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5 20c.5-4.1 2.8-6 7-6s6.5 1.9 7 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+      <symbol id="icon-more" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.7" fill="currentColor"/><circle cx="12" cy="12" r="1.7" fill="currentColor"/><circle cx="12" cy="19" r="1.7" fill="currentColor"/></symbol>
+      <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m15.5 15.5 5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+      <symbol id="icon-archive" viewBox="0 0 24 24"><path d="M4 7h16v13H4V7Zm-1-3h18v4H3V4Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 12h6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+      <symbol id="icon-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+      <symbol id="icon-back" viewBox="0 0 24 24"><path d="m14.5 5-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 4v16M4 12h16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+      <symbol id="icon-mic" viewBox="0 0 24 24"><rect x="8.5" y="3" width="7" height="12" rx="3.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3M9 21h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+      <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 20h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="icon-close" viewBox="0 0 24 24"><path d="m5 5 14 14M19 5 5 19" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+      <symbol id="icon-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z" fill="currentColor"/></symbol>
+      <symbol id="icon-pause" viewBox="0 0 24 24"><path d="M7 5h4v14H7V5Zm6 0h4v14h-4V5Z" fill="currentColor"/></symbol>
+      <symbol id="icon-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6V3Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M14 3v5h4M9 13h6M9 17h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+      <symbol id="icon-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="8.5" cy="9" r="1.5" fill="currentColor"/><path d="m5 18 5-5 3.2 3.2 2.1-2.1L19 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="icon-media-library" viewBox="0 0 24 24"><rect x="5" y="5" width="15" height="14" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M3 8v11a2 2 0 0 0 2 2h12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="10" cy="10" r="1.5" fill="currentColor"/><path d="m7 17 4-4 2.5 2.5L15 14l3 3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="icon-video-call" viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m16 10 5-3v10l-5-3v-4Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+      <symbol id="icon-phone" viewBox="0 0 24 24"><path d="M7.1 3.8 10 7.4 8.2 9.2c1.2 2.6 3 4.4 5.6 5.6l1.8-1.8 3.6 2.9-.8 3.4c-.2.8-.9 1.3-1.7 1.3C9.4 20.6 3.4 14.6 3.4 7.3c0-.8.5-1.5 1.3-1.7l2.4-.6Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="4" width="11" height="14" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16 20H6.8A1.8 1.8 0 0 1 5 18.2V8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+      <symbol id="icon-link" viewBox="0 0 24 24"><path d="m9.5 14.5 5-5M7.7 17.7l-1.4 1.4a3.1 3.1 0 0 1-4.4-4.4l3.5-3.5a3.1 3.1 0 0 1 4.4 0M16.3 6.3l1.4-1.4a3.1 3.1 0 1 1 4.4 4.4l-3.5 3.5a3.1 3.1 0 0 1-4.4 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+      <symbol id="icon-calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7 3v4M17 3v4M3 10h18" stroke="currentColor" stroke-width="1.8"/><path d="M8 14h3v3H8z" fill="currentColor"/></symbol>
+      <symbol id="icon-chevron-left" viewBox="0 0 24 24"><path d="m14.5 5-7 7 7 7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="icon-chevron-right" viewBox="0 0 24 24"><path d="m9.5 5 7 7-7 7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="icon-check-double" viewBox="0 0 24 24"><path d="m2.5 12 4 4 7-7M9 15l2 2L21.5 6.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="icon-alert" viewBox="0 0 24 24"><path d="M12 3 2.5 20h19L12 3Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 9v5M12 17.5v.2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+      <symbol id="icon-forward" viewBox="0 0 24 24"><path d="m14 5 6 6-6 6v-4c-5 0-8 .8-10 5 .3-6.5 3.7-9 10-9V5Z" fill="currentColor"/></symbol>
+    </svg>
+  </body>
+</html>
