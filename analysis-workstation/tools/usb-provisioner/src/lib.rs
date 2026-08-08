@@ -297,6 +297,10 @@ pub fn provision_usb(
             })
         })
         .collect::<Result<Vec<_>, ProvisionerError>>()?;
+    let first_assignment = request.assignments.first().ok_or_else(|| {
+        ProvisionerError::InvalidInput("at least one assignment is required".to_owned())
+    })?;
+    let post_provision_validation_time = parse_utc(&first_assignment.valid_from_utc)?;
 
     let profile =
         read_json::<WorkstationProfile>(&request.state_dir.join("workstation-profile.json"))?;
@@ -328,7 +332,10 @@ pub fn provision_usb(
         created_at_utc: request.created_at_utc,
     })?;
 
-    let bundle = PortableBundle::load_from_root(request.usb_root, request.created_at_utc)?;
+    // A newly issued task may intentionally start a few minutes in the future.
+    // Validate the signed portable structure at the first assignment's start
+    // instant rather than falsely requiring it to be active during provisioning.
+    let bundle = PortableBundle::load_from_root(request.usb_root, post_provision_validation_time)?;
     let unlocked_operator = bundle.unlock_operator_key(request.operator_passphrase)?;
     if unlocked_operator.public_key_fingerprint_sha256
         != provisioned.operator_key_fingerprint_sha256

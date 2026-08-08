@@ -1,0 +1,21 @@
+{
+  "name": "@wafc/workstation-core",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "pnpm run build && node --test dist/*.test.js"
+  },
+  "dependencies": {
+    "@wafc/domain": "workspace:*",
+    "@wafc/evidence-repository": "workspace:*",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3"
+  }
+}
