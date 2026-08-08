@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.whatsapp-forensics.invalid/waeb/v1/records/event-1.0.schema.json",
+  "title": "WAEB generic observed event data",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["eventKind", "nativeType", "subjectRecordIds", "actorRecordIds", "occurredAtUtc", "details", "unsupportedReasonCodes"],
+  "properties": {
+    "eventKind": {"type": "string", "pattern": "^[a-z][a-z0-9_]{2,100}$"},
+    "nativeType": {"type": "string", "minLength": 1, "maxLength": 160},
+    "subjectRecordIds": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "../common-1.0.schema.json#/$defs/recordId"}
+    },
+    "actorRecordIds": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "../common-1.0.schema.json#/$defs/recordId"}
+    },
+    "occurredAtUtc": {"type": ["string", "null"], "format": "date-time"},
+    "details": {"$ref": "../common-1.0.schema.json#/$defs/extensions"},
+    "unsupportedReasonCodes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z0-9_]{3,100}$"}
+    }
+  }
+}

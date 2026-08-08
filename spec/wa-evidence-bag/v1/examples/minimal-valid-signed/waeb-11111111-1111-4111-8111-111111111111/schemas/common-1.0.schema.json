@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.whatsapp-forensics.invalid/waeb/v1/common-1.0.schema.json",
+  "title": "WAEB common definitions",
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "utcTimestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "sha512": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{128}$"
+    },
+    "recordId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{7,127}$"
+    },
+    "decimalInteger": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "safeRelativePath": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)[ -~]+$"
+    },
+    "nativeIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "opaqueValue"],
+      "properties": {
+        "kind": {"enum": ["jid", "lid", "phone", "newsletter", "broadcast", "native_unknown"]},
+        "opaqueValue": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    },
+    "rawRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "recordId", "contentSha256"],
+      "properties": {
+        "path": {"$ref": "#/$defs/safeRelativePath"},
+        "recordId": {"$ref": "#/$defs/recordId"},
+        "contentSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "phase"],
+      "properties": {
+        "provider": {"enum": ["store", "indexeddb", "dom_validation", "derived"]},
+        "phase": {"enum": ["baseline", "enriched"]},
+        "rawRef": {"$ref": "#/$defs/rawRef"},
+        "absenceReason": {"type": "string", "pattern": "^[a-z0-9_]{3,80}$"}
+      },
+      "oneOf": [
+        {"required": ["rawRef"]},
+        {"required": ["absenceReason"]}
+      ]
+    },
+    "extensions": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z0-9][a-z0-9.-]{2,100}$"},
+      "additionalProperties": true
+    }
+  }
+}

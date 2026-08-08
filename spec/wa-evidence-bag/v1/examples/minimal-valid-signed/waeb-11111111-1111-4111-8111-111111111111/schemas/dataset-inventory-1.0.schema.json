@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.whatsapp-forensics.invalid/waeb/v1/dataset-inventory-1.0.schema.json",
+  "title": "WAEB v1 dataset inventory",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "sourceId", "generatedAtUtc", "datasets"],
+  "properties": {
+    "schemaVersion": {"const": "1.0.0"},
+    "sourceId": {"$ref": "common-1.0.schema.json#/$defs/uuid"},
+    "generatedAtUtc": {"$ref": "common-1.0.schema.json#/$defs/utcTimestamp"},
+    "datasets": {
+      "type": "array",
+      "minItems": 18,
+      "maxItems": 18,
+      "prefixItems": [
+        {"$ref": "#/$defs/dataset", "properties": {"name": {"const": "accounts"}, "path": {"const": "data/normalized/accounts.ndjson"}, "recordType": {"const": "account"}}},
+        {"$ref": "#/$defs/dataset", "properties": {"name": {"const": "contacts"}, "path": {"const": "data/normalized/contacts.ndjson"}, "recordType": {"const": "contact"}}},
+        {"$ref": "#/$defs/dataset", "properties": {"name": {"const": "chats"}, "path": {"const": "data/normalized/chats.ndjson"}, "recordType": {"const": "chat"}}},
+        {"$ref": "#/$defs/dataset", "properties": {"name": {"const": "chat_lists"}, "path": {"const": "data/normalized/chat-lists.ndjson"}, "recordType": {"const": "chat_list"}}},
+        {"$ref": "#/$defs/dataset", "properties": {"name": {"const": "participants"}, "path": {"const": "data/normalized/participants.ndjson"}, "recordType": {"const": "participant"}}},
+        {"$ref": "#/$defs/dataset", "properties": {"name": {"const": "messages"}, "path": {"const": "data/normalized/messages.ndjson"}, "recordType": {"const": "message"}}},
+        {"$ref": "#/$defs/dataset", "properties": {"name": {"const": "message_events"}, "path": {"const": "data/normalized/message-events.ndjson"}, "recordType": {"const": "message_event"}}},
+        {"$ref": "#/$defs/dataset", "properties": {"name": {"const": "reactions"}, "path": {"const": "data/normalized/reactions.ndjson"}, "recordType": {"const": "reaction"}}},
+        {"$ref": "#/$defs/dataset", "properties": {"name": {"const": "receipts"}, "path": {"const": "data/normalized/receipts.ndjson"}, "recordType": {"const": "receipt"}}},
+        {"$ref": "#/$defs/dataset", "properties": {"name": {"const": "poll_votes"}, "path": {"const": "data/normalized/poll-votes.ndjson"}, "recordType": {"const": "poll_vote"}}},
+        {"$ref": "#/$defs/dataset", "properties": {"name": {"const": "group_events"}, "path": {"const": "data/normalized/group-events.ndjson"}, "recordType": {"const": "group_event"}}},
+        {"$ref": "#/$defs/dataset", "properties": {"name": {"const": "statuses"}, "path": {"const": "data/normalized/statuses.ndjson"}, "recordType": {"const": "status"}}},
+        {"$ref": "#/$defs/dataset", "properties": {"name": {"const": "calls"}, "path": {"const": "data/normalized/calls.ndjson"}, "recordType": {"const": "call"}}},
+        {"$ref": "#/$defs/dataset", "properties": {"name": {"const": "channels"}, "path": {"const": "data/normalized/channels.ndjson"}, "recordType": {"const": "channel"}}},
+        {"$ref": "#/$defs/dataset", "properties": {"name": {"const": "channel_events"}, "path": {"const": "data/normalized/channel-events.ndjson"}, "recordType": {"const": "channel_event"}}},
+        {"$ref": "#/$defs/dataset", "properties": {"name": {"const": "communities"}, "path": {"const": "data/normalized/communities.ndjson"}, "recordType": {"const": "community"}}},
+        {"$ref": "#/$defs/dataset", "properties": {"name": {"const": "community_relations"}, "path": {"const": "data/normalized/community-relations.ndjson"}, "recordType": {"const": "community_relation"}}},
+        {"$ref": "#/$defs/dataset", "properties": {"name": {"const": "presence_snapshots"}, "path": {"const": "data/normalized/presence-snapshots.ndjson"}, "recordType": {"const": "presence_snapshot"}}}
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "observationWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startedAtUtc", "endedAtUtc"],
+      "properties": {
+        "startedAtUtc": {"$ref": "common-1.0.schema.json#/$defs/utcTimestamp"},
+        "endedAtUtc": {"$ref": "common-1.0.schema.json#/$defs/utcTimestamp"}
+      }
+    },
+    "reasonCodes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z0-9_]{3,100}$"}
+    },
+    "dataset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name", "path", "recordType", "capability", "requestState", "result",
+        "recordCount", "byteLength", "observationWindow", "reasonCodes"
+      ],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]{2,80}$"},
+        "path": {"$ref": "common-1.0.schema.json#/$defs/safeRelativePath"},
+        "recordType": {"type": "string", "pattern": "^[a-z][a-z0-9_]{2,80}$"},
+        "capability": {"enum": ["supported", "unsupported", "unknown"]},
+        "requestState": {"enum": ["requested", "not_requested"]},
+        "result": {"enum": ["not_requested", "unsupported", "empty", "complete_as_observed", "partial", "failed"]},
+        "recordCount": {"type": "integer", "minimum": 0},
+        "byteLength": {"type": "integer", "minimum": 0},
+        "observationWindow": {
+          "oneOf": [
+            {"$ref": "#/$defs/observationWindow"},
+            {"type": "null"}
+          ]
+        },
+        "reasonCodes": {"$ref": "#/$defs/reasonCodes"}
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "requestState": {"const": "not_requested"},
+            "result": {"const": "not_requested"},
+            "recordCount": {"const": 0},
+            "byteLength": {"const": 0},
+            "observationWindow": {"type": "null"},
+            "reasonCodes": {"minItems": 1}
+          }
+        },
+        {
+          "properties": {
+            "capability": {"const": "unsupported"},
+            "requestState": {"const": "requested"},
+            "result": {"const": "unsupported"},
+            "recordCount": {"const": 0},
+            "byteLength": {"const": 0},
+            "observationWindow": {"type": "null"},
+            "reasonCodes": {"minItems": 1}
+          }
+        },
+        {
+          "properties": {
+            "capability": {"const": "supported"},
+            "requestState": {"const": "requested"},
+            "result": {"const": "empty"},
+            "recordCount": {"const": 0},
+            "byteLength": {"const": 0},
+            "observationWindow": {"$ref": "#/$defs/observationWindow"}
+          }
+        },
+        {
+          "properties": {
+            "capability": {"const": "supported"},
+            "requestState": {"const": "requested"},
+            "result": {"const": "complete_as_observed"},
+            "recordCount": {"type": "integer", "minimum": 1},
+            "byteLength": {"type": "integer", "minimum": 1},
+            "observationWindow": {"$ref": "#/$defs/observationWindow"}
+          }
+        },
+        {
+          "properties": {
+            "capability": {"const": "supported"},
+            "requestState": {"const": "requested"},
+            "result": {"const": "partial"},
+            "observationWindow": {"$ref": "#/$defs/observationWindow"},
+            "reasonCodes": {"minItems": 1}
+          }
+        },
+        {
+          "properties": {
+            "capability": {"enum": ["supported", "unknown"]},
+            "requestState": {"const": "requested"},
+            "result": {"const": "failed"},
+            "recordCount": {"const": 0},
+            "byteLength": {"const": 0},
+            "reasonCodes": {"minItems": 1}
+          }
+        }
+      ]
+    }
+  }
+}

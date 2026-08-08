@@ -1,0 +1,27 @@
+[package]
+name = "field-collector"
+description = "Portable WhatsApp Web Field Collector"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+browser-cdp = { path = "../browser-cdp" }
+browser-profile = { path = "../browser-profile" }
+chrono.workspace = true
+collector-core = { path = "../collector-core" }
+eframe.workspace = true
+extension-transport = { path = "../extension-transport" }
+getopts.workspace = true
+portable-config = { path = "../portable-config" }
+rpassword.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+waeb-writer = { path = "../waeb-writer" }
+zeroize.workspace = true
+
+[lints]
+workspace = true

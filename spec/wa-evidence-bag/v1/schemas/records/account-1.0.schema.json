@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.whatsapp-forensics.invalid/waeb/v1/records/account-1.0.schema.json",
+  "title": "WAEB account data",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["nativeIdentities", "displayName", "accountKind", "isBusiness", "verifiedName", "profileAssetIds", "observedDevice"],
+  "properties": {
+    "nativeIdentities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "../common-1.0.schema.json#/$defs/nativeIdentity"}
+    },
+    "displayName": {"type": ["string", "null"], "maxLength": 512},
+    "accountKind": {"enum": ["consumer", "business", "unknown"]},
+    "isBusiness": {"type": "boolean"},
+    "verifiedName": {"type": ["string", "null"], "maxLength": 512},
+    "profileAssetIds": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "../common-1.0.schema.json#/$defs/recordId"}
+    },
+    "observedDevice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deviceId", "isCompanion"],
+      "properties": {
+        "deviceId": {"type": ["string", "null"], "maxLength": 160},
+        "isCompanion": {"type": "boolean"}
+      }
+    }
+  }
+}

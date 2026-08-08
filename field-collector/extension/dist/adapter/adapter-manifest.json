@@ -1,0 +1,6 @@
+{
+    "schemaVersion":  "wafc-adapter-manifest/1",
+    "adapterId":  "wa-private-collections-v1",
+    "version":  "1.0.0",
+    "sha256":  "sha256:7b26ee16b83a0cf318aeb6bb4402d1ceda2e3f06879e6637679764180575dc69"
+}

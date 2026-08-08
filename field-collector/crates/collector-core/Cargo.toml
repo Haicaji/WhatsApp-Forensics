@@ -1,0 +1,32 @@
+[package]
+name = "collector-core"
+description = "Field Collector acquisition state machine and orchestration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+browser-cdp = { path = "../browser-cdp" }
+chrono.workspace = true
+hex.workspace = true
+page-bridge = { path = "../page-bridge" }
+portable-keystore = { path = "../portable-keystore" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+waeb-writer = { path = "../waeb-writer" }
+
+[dev-dependencies]
+futures-util.workspace = true
+portable-keystore = { path = "../portable-keystore", features = ["provisioning"] }
+tokio-tungstenite.workspace = true
+
+[lints]
+workspace = true

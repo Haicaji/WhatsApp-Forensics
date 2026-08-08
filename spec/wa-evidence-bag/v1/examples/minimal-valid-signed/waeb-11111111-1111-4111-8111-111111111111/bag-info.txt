@@ -1,0 +1,6 @@
+Bagging-Date: 2026-01-15
+Bag-Software-Agent: Synthetic WAEB Fixture Builder/1.0.0
+Payload-Oxum: 24578.28
+External-Identifier: 11111111-1111-4111-8111-111111111111
+WAEvidenceBag-Version: 1.0.0-draft.1
+Source-Organization: Synthetic fixture only

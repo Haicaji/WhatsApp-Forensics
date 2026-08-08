@@ -1,0 +1,25 @@
+[package]
+name = "browser-cdp"
+description = "Strict loopback CDP discovery and transport for Field Collector"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+url.workspace = true
+hex.workspace = true
+windows-sys.workspace = true
+winreg.workspace = true
+
+[lints]
+workspace = true

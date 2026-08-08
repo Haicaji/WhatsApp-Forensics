@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.whatsapp-forensics.invalid/waeb/v1/records/generic-entity-1.0.schema.json",
+  "title": "WAEB channel/community entity data",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["nativeIdentities", "entityKind", "displayName", "description", "state", "mediaAssetIds", "unsupportedReasonCodes"],
+  "properties": {
+    "nativeIdentities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "../common-1.0.schema.json#/$defs/nativeIdentity"}
+    },
+    "entityKind": {"enum": ["channel", "community", "unknown"]},
+    "displayName": {"type": ["string", "null"], "maxLength": 512},
+    "description": {"type": ["string", "null"], "maxLength": 65536},
+    "state": {"$ref": "../common-1.0.schema.json#/$defs/extensions"},
+    "mediaAssetIds": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "../common-1.0.schema.json#/$defs/recordId"}
+    },
+    "unsupportedReasonCodes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z0-9_]{3,100}$"}
+    }
+  }
+}

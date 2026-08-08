@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wafc.local/spec/portable/v1/schemas/workstation-trust-1.0.schema.json",
+  "title": "WAFC Analysis Workstation trust record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "workstationId",
+    "keyId",
+    "algorithm",
+    "encoding",
+    "publicKeySpkiBase64",
+    "fingerprintSha256"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "wafc-workstation-trust/1" },
+    "workstationId": { "$ref": "common-1.0.schema.json#/$defs/identifier" },
+    "keyId": { "$ref": "common-1.0.schema.json#/$defs/identifier" },
+    "algorithm": { "const": "Ed25519" },
+    "encoding": { "const": "spki-der" },
+    "publicKeySpkiBase64": {
+      "type": "string",
+      "minLength": 40,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+    },
+    "fingerprintSha256": {
+      "$ref": "common-1.0.schema.json#/$defs/fingerprint"
+    }
+  }
+}

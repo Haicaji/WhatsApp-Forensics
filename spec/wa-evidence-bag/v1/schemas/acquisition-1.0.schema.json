@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.whatsapp-forensics.invalid/waeb/v1/acquisition-1.0.schema.json",
+  "title": "WA Evidence Bag acquisition metadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "waEvidenceBagVersion", "evidenceId", "acquisitionId", "sourceId",
+    "synthetic", "collector", "injector", "adapter", "environment", "operator",
+    "authorization", "portableConfiguration", "observationWindow", "acquisitionMode", "log", "privacy"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "1.0.0"},
+    "waEvidenceBagVersion": {"const": "1.0.0-draft.1"},
+    "evidenceId": {"$ref": "common-1.0.schema.json#/$defs/uuid"},
+    "acquisitionId": {"$ref": "common-1.0.schema.json#/$defs/uuid"},
+    "sourceId": {"$ref": "common-1.0.schema.json#/$defs/uuid"},
+    "synthetic": {"type": "boolean"},
+    "fixture": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["fixtureId", "generatorVersion", "seed"],
+      "properties": {
+        "fixtureId": {"type": "string", "pattern": "^[a-z0-9-]{3,80}$"},
+        "generatorVersion": {"type": "string", "minLength": 1, "maxLength": 80},
+        "seed": {"type": "string", "minLength": 1, "maxLength": 128}
+      }
+    },
+    "collector": {"$ref": "#/$defs/component"},
+    "injector": {"$ref": "#/$defs/component"},
+    "adapter": {"$ref": "#/$defs/component"},
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "browser", "whatsappBuild", "locale", "timeZone"],
+      "properties": {
+        "os": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["family", "version", "architecture"],
+          "properties": {
+            "family": {"enum": ["windows"]},
+            "version": {"type": "string", "maxLength": 120},
+            "architecture": {"enum": ["x86_64", "arm64", "unknown"]}
+          }
+        },
+        "browser": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["family", "version", "profileMode", "debugTransport"],
+          "properties": {
+            "family": {"enum": ["chrome", "edge", "brave", "chromium"]},
+            "version": {"type": "string", "maxLength": 120},
+            "profileMode": {"enum": ["authorized_existing", "dedicated_acquisition"]},
+            "profileReferenceSha256": {"$ref": "common-1.0.schema.json#/$defs/sha256"},
+            "debugTransport": {"enum": ["loopback_websocket", "pipe"]}
+          }
+        },
+        "whatsappBuild": {"type": "string", "minLength": 1, "maxLength": 160},
+        "locale": {"type": "string", "minLength": 2, "maxLength": 40},
+        "timeZone": {"type": "string", "minLength": 1, "maxLength": 80}
+      }
+    },
+    "operator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operatorId"],
+      "properties": {
+        "operatorId": {"type": "string", "pattern": "^[a-z0-9_-]{3,80}$"},
+        "displayName": {"type": ["string", "null"], "maxLength": 160}
+      }
+    },
+    "authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "confirmedAtUtc"],
+      "properties": {
+        "reference": {"type": "string", "minLength": 1, "maxLength": 240},
+        "confirmedAtUtc": {"$ref": "common-1.0.schema.json#/$defs/utcTimestamp"}
+      }
+    },
+    "portableConfiguration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundleId",
+        "bundleManifestSha256",
+        "assignmentId",
+        "assignmentSha256",
+        "workstationKeyFingerprintSha256"
+      ],
+      "properties": {
+        "bundleId": {"$ref": "common-1.0.schema.json#/$defs/uuid"},
+        "bundleManifestSha256": {"$ref": "common-1.0.schema.json#/$defs/sha256"},
+        "assignmentId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{2,119}$"},
+        "assignmentSha256": {"$ref": "common-1.0.schema.json#/$defs/sha256"},
+        "workstationKeyFingerprintSha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "observationWindow": {"$ref": "#/$defs/window"},
+    "acquisitionMode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseline", "enrichmentRequested", "uiFallbackAllowed"],
+      "properties": {
+        "baseline": {"const": true},
+        "enrichmentRequested": {"type": "boolean"},
+        "uiFallbackAllowed": {"type": "boolean"}
+      }
+    },
+    "log": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "eventCount", "terminalEventHash"],
+      "properties": {
+        "path": {"const": "data/logs/acquisition.ndjson"},
+        "eventCount": {"type": "integer", "minimum": 1},
+        "terminalEventHash": {"$ref": "common-1.0.schema.json#/$defs/sha256"}
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["normalizedWhitelist", "omittedFieldClasses", "restrictedRawIncluded"],
+      "properties": {
+        "normalizedWhitelist": {"const": true},
+        "omittedFieldClasses": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["media_keys", "access_tokens", "direct_urls", "cookies", "credentials", "debug_secrets"]}
+        },
+        "restrictedRawIncluded": {"type": "boolean"}
+      }
+    },
+    "extensions": {"$ref": "common-1.0.schema.json#/$defs/extensions"}
+  },
+  "$defs": {
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "sha256"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 120},
+        "version": {"type": "string", "minLength": 1, "maxLength": 80},
+        "sha256": {"$ref": "common-1.0.schema.json#/$defs/sha256"}
+      }
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startedAtUtc", "endedAtUtc"],
+      "properties": {
+        "startedAtUtc": {"$ref": "common-1.0.schema.json#/$defs/utcTimestamp"},
+        "endedAtUtc": {"$ref": "common-1.0.schema.json#/$defs/utcTimestamp"}
+      }
+    }
+  }
+}

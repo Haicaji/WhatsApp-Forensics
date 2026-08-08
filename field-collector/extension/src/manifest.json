@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "WAFC WhatsApp 只读取证连接器",
+  "short_name": "WAFC 取证连接器",
+  "version": "0.1.0",
+  "description": "仅在操作者当前选择的 WhatsApp Web 标签页中连接 Field Collector，执行被动只读采集。",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "activeTab",
+    "debugger"
+  ],
+  "action": {
+    "default_title": "连接 WhatsApp Field Collector",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "service-worker.js"
+  }
+}

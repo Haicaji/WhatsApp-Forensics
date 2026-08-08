@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.whatsapp-forensics.invalid/waeb/v1/records/chat-list-1.0.schema.json",
+  "title": "WAEB chat list data",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["nativeIdentity", "listKind", "name", "order", "chatRecordIds"],
+  "properties": {
+    "nativeIdentity": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "../common-1.0.schema.json#/$defs/nativeIdentity"}
+      ]
+    },
+    "listKind": {"enum": ["favorites", "custom"]},
+    "name": {"type": "string", "minLength": 1, "maxLength": 512},
+    "order": {"type": "integer", "minimum": 0},
+    "chatRecordIds": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "../common-1.0.schema.json#/$defs/recordId"}
+    }
+  }
+}

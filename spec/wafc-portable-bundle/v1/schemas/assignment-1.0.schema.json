@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wafc.local/spec/portable/v1/schemas/assignment-1.0.schema.json",
+  "title": "WAFC signed field assignment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "payload", "signature"],
+  "properties": {
+    "schemaVersion": { "const": "wafc-assignment/1" },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assignmentId",
+        "authorizationReference",
+        "operatorId",
+        "allowedKeyId",
+        "sourceOrganization",
+        "issuedAtUtc",
+        "validFromUtc",
+        "validUntilUtc",
+        "acquisitionMode",
+        "targetDescription"
+      ],
+      "properties": {
+        "assignmentId": { "$ref": "common-1.0.schema.json#/$defs/identifier" },
+        "authorizationReference": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "operatorId": { "$ref": "common-1.0.schema.json#/$defs/identifier" },
+        "allowedKeyId": { "$ref": "common-1.0.schema.json#/$defs/identifier" },
+        "sourceOrganization": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "issuedAtUtc": { "$ref": "common-1.0.schema.json#/$defs/utcDateTime" },
+        "validFromUtc": { "$ref": "common-1.0.schema.json#/$defs/utcDateTime" },
+        "validUntilUtc": { "$ref": "common-1.0.schema.json#/$defs/utcDateTime" },
+        "acquisitionMode": { "const": "passive_t0" },
+        "targetDescription": { "type": "string", "minLength": 1, "maxLength": 500 }
+      }
+    },
+    "signature": {
+      "$ref": "common-1.0.schema.json#/$defs/signature"
+    }
+  }
+}

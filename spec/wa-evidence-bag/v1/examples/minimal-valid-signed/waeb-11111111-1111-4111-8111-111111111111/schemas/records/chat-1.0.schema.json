@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.whatsapp-forensics.invalid/waeb/v1/records/chat-1.0.schema.json",
+  "title": "WAEB chat data",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["nativeIdentity", "kind", "title", "participantRecordIds", "state", "ephemeral", "firstObservedAtUtc", "lastObservedAtUtc"],
+  "properties": {
+    "nativeIdentity": {"$ref": "../common-1.0.schema.json#/$defs/nativeIdentity"},
+    "kind": {"enum": ["direct", "group", "broadcast", "system", "unknown"]},
+    "title": {"type": ["string", "null"], "maxLength": 512},
+    "participantRecordIds": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "../common-1.0.schema.json#/$defs/recordId"}
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["archived", "pinned", "readOnly", "unreadCount", "mutedUntilUtc"],
+      "properties": {
+        "archived": {"type": "boolean"},
+        "pinned": {"type": "boolean"},
+        "readOnly": {"type": "boolean"},
+        "unreadCount": {"type": "integer", "minimum": 0},
+        "mutedUntilUtc": {"type": ["string", "null"], "format": "date-time"}
+      }
+    },
+    "ephemeral": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "durationSeconds"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "durationSeconds": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "firstObservedAtUtc": {"$ref": "../common-1.0.schema.json#/$defs/utcTimestamp"},
+    "lastObservedAtUtc": {"$ref": "../common-1.0.schema.json#/$defs/utcTimestamp"}
+  }
+}

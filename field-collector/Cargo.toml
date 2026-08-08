@@ -1,0 +1,69 @@
+[workspace]
+members = [
+  "crates/browser-cdp",
+  "crates/browser-profile",
+  "crates/collector-core",
+  "crates/extension-transport",
+  "crates/field-collector-app",
+  "crates/page-bridge",
+  "crates/portable-config",
+  "crates/portable-keystore",
+  "crates/waeb-writer",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "AGPL-3.0-only"
+repository = "https://github.com/Haicaji/WhatsApp-Forensics"
+
+[workspace.dependencies]
+anyhow = "=1.0.99"
+argon2 = "=0.5.3"
+base64 = "=0.22.1"
+chacha20poly1305 = { version = "=0.10.1", features = ["std"] }
+chrono = { version = "=0.4.41", default-features = false, features = ["clock", "serde", "std"] }
+ed25519-dalek = { version = "=3.0.0", features = ["alloc", "pkcs8", "rand_core"] }
+eframe = { version = "=0.33.3", default-features = false, features = ["glow"] }
+futures-util = "=0.3.31"
+getrandom = "=0.4.3"
+getopts = "=0.2.23"
+hex = "=0.4.3"
+rpassword = "=7.4.0"
+serde = { version = "=1.0.219", features = ["derive"] }
+serde_json = "=1.0.143"
+sha2 = "=0.10.9"
+subtle = "=2.6.1"
+thiserror = "=2.0.16"
+tokio = { version = "=1.47.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect"] }
+url = "=2.5.7"
+uuid = { version = "=1.18.0", features = ["serde", "v4"] }
+walkdir = "=2.5.0"
+windows-sys = { version = "=0.60.2", features = [
+  "Win32_Foundation",
+  "Win32_Networking_WinSock",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Threading",
+] }
+winreg = "=0.55.0"
+zeroize = { version = "=1.8.1", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = { level = "deny", priority = 1 }
+expect_used = { level = "deny", priority = 1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

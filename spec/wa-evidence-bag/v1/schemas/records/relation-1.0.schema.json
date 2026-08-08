@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.whatsapp-forensics.invalid/waeb/v1/records/relation-1.0.schema.json",
+  "title": "WAEB community relation data",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["relationKind", "fromRecordId", "toRecordId", "resolution", "observedAtUtc", "details"],
+  "properties": {
+    "relationKind": {"enum": ["community_announcement_group", "community_child_group", "community_parent", "unknown"]},
+    "fromRecordId": {"$ref": "../common-1.0.schema.json#/$defs/recordId"},
+    "toRecordId": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "../common-1.0.schema.json#/$defs/recordId"}
+      ]
+    },
+    "resolution": {"enum": ["resolved", "unresolved"]},
+    "observedAtUtc": {"$ref": "../common-1.0.schema.json#/$defs/utcTimestamp"},
+    "details": {"$ref": "../common-1.0.schema.json#/$defs/extensions"}
+  }
+}

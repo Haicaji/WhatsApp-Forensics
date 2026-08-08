@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.whatsapp-forensics.invalid/waeb/v1/completeness-1.0.schema.json",
+  "title": "WAEB acquisition completeness",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "sourceId", "evaluatedAtUtc", "overall", "localSnapshot",
+    "historyScope", "mediaScope", "accountScope", "datasetInventoryPath",
+    "chatCompletenessPath", "mediaCounts", "crossChecks", "reasonCodes"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "1.0.0"},
+    "sourceId": {"$ref": "common-1.0.schema.json#/$defs/uuid"},
+    "evaluatedAtUtc": {"$ref": "common-1.0.schema.json#/$defs/utcTimestamp"},
+    "overall": {"enum": ["complete_as_observed", "partial", "failed"]},
+    "localSnapshot": {"enum": ["verified", "partial", "failed"]},
+    "historyScope": {"enum": ["terminal_observed", "stable_no_growth", "limit_reached", "loader_error", "not_run"]},
+    "mediaScope": {"enum": ["complete", "partial", "not_requested"]},
+    "accountScope": {"const": "unverifiable"},
+    "datasetInventoryPath": {"const": "data/dataset-inventory.json"},
+    "chatCompletenessPath": {"const": "data/completeness/chats.ndjson"},
+    "mediaCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested", "full", "thumbnail", "missing", "expired", "decryptError", "notRequested"],
+      "properties": {
+        "requested": {"type": "integer", "minimum": 0},
+        "full": {"type": "integer", "minimum": 0},
+        "thumbnail": {"type": "integer", "minimum": 0},
+        "missing": {"type": "integer", "minimum": 0},
+        "expired": {"type": "integer", "minimum": 0},
+        "decryptError": {"type": "integer", "minimum": 0},
+        "notRequested": {"type": "integer", "minimum": 0}
+      }
+    },
+    "crossChecks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inventoryCountsMatch", "mediaIndexMatchesCas", "normalizedRefsResolved", "differences"],
+      "properties": {
+        "inventoryCountsMatch": {"type": "boolean"},
+        "mediaIndexMatchesCas": {"type": "boolean"},
+        "normalizedRefsResolved": {"type": "boolean"},
+        "differences": {
+          "type": "array",
+          "items": {"type": "string", "maxLength": 300}
+        }
+      }
+    },
+    "reasonCodes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z0-9_]{3,100}$"}
+    }
+  }
+}
