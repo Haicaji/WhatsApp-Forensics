@@ -158,7 +158,7 @@ workspace 的 `target/`。
 ```powershell
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [System.IO.Compression.ZipFile]::OpenRead(
-  '.\field-collector\out\whatsapp-field-collector-v0.1.0-windows-x86_64.zip'
+  '.\field-collector\out\whatsapp-field-collector-v0.2.6-windows-x86_64.zip'
 )
 try { $zip.Entries | Select-Object FullName, Length } finally { $zip.Dispose() }
 ```

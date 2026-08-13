@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 //! Portable Field Collector native application and command-line interface.
 
 mod gui;
@@ -21,7 +23,7 @@ use browser_cdp::{
 use chrono::{Local, SecondsFormat, Utc};
 #[cfg(debug_assertions)]
 use collector_core::{
-    AccountConfirmationChallenge, TargetInspectionRequest, collect_t0, inspect_target, preflight,
+    AccountConfirmationChallenge, TargetInspectionRequest, collect, inspect_target, preflight,
 };
 use collector_core::{AcquisitionRequest, AcquisitionResult, PortableConfigurationContext};
 #[cfg(any(debug_assertions, test))]
@@ -44,6 +46,11 @@ struct HandoffData {
     signer_fingerprint: String,
     record_counts: BTreeMap<String, u64>,
     unresolved_reference_count: usize,
+    completeness_overall: String,
+    local_snapshot: String,
+    history_scope: String,
+    media_scope: String,
+    completeness_reason_codes: Vec<String>,
     operator_id: String,
     authorization_reference: String,
     authorization_confirmed_at_utc: String,
@@ -64,7 +71,7 @@ struct CapturedStream {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run().await {
+    match Box::pin(run()).await {
         Ok(code) => code,
         Err(error) => {
             eprintln!("Field Collector 失败：{error:#}");
@@ -90,7 +97,7 @@ async fn run() -> Result<ExitCode> {
         #[cfg(debug_assertions)]
         "launch-dedicated" => command_launch_dedicated(&rest),
         #[cfg(debug_assertions)]
-        "collect" => command_collect(&rest).await,
+        "collect" => Box::pin(command_collect(&rest)).await,
         "gui" => gui::run(),
         "help" | "--help" | "-h" => {
             print_root_help();
@@ -281,7 +288,7 @@ fn acquisition_request_from_bundle(
     endpoint: CdpEndpoint,
     dedicated_profile_dir: Option<PathBuf>,
     target_id: String,
-    passive_t0_consent: bool,
+    operator_consent: bool,
 ) -> AcquisitionRequest {
     let profile = bundle.profile();
     AcquisitionRequest {
@@ -296,7 +303,9 @@ fn acquisition_request_from_bundle(
         operator_display_name: Some(profile.display_name.clone()),
         authorization_reference: assignment.payload.authorization_reference.clone(),
         authorization_confirmed_at_utc: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        passive_t0_consent,
+        acquisition_mode: assignment.payload.acquisition_mode,
+        media_policy: assignment.payload.media_policy,
+        operator_consent,
         locale: automatic_locale(),
         time_zone: automatic_time_zone(),
         source_organization: assignment.payload.source_organization.clone(),
@@ -313,6 +322,7 @@ fn acquisition_request_from_bundle(
                 .evidence_signing_key_fingerprint_sha256
                 .clone(),
         },
+        resume_evidence_id: None,
     }
 }
 
@@ -378,7 +388,12 @@ async fn command_collect(arguments: &[String]) -> Result<ExitCode> {
         .evidence_signing_key_fingerprint_sha256
         .clone();
     let passphrase = Zeroizing::new(rpassword::prompt_password("请输入勘察员密钥口令: ")?);
-    let mut result = collect_t0(&request, &passphrase, request_operator_confirmation).await?;
+    let mut result = Box::pin(collect(
+        &request,
+        &passphrase,
+        request_operator_confirmation,
+    ))
+    .await?;
 
     match run_external_verifier(
         &verifier,
@@ -480,6 +495,11 @@ fn write_handoff_summary(
         signer_fingerprint: acquisition.signer_fingerprint.clone(),
         record_counts: acquisition.record_counts.clone(),
         unresolved_reference_count: acquisition.unresolved_reference_count,
+        completeness_overall: acquisition.completeness.overall.clone(),
+        local_snapshot: acquisition.completeness.local_snapshot.clone(),
+        history_scope: acquisition.completeness.history_scope.clone(),
+        media_scope: acquisition.completeness.media_scope.clone(),
+        completeness_reason_codes: acquisition.completeness.reason_codes.clone(),
         operator_id: request.operator_id.clone(),
         authorization_reference: request.authorization_reference.clone(),
         authorization_confirmed_at_utc: request.authorization_confirmed_at_utc.clone(),
@@ -516,6 +536,13 @@ fn handoff_document(data: &HandoffData) -> Value {
             "accountScope": "unverifiable",
             "recordCounts": data.record_counts,
             "unresolvedReferenceCount": data.unresolved_reference_count,
+            "completeness": {
+                "overall": data.completeness_overall,
+                "localSnapshot": data.local_snapshot,
+                "historyScope": data.history_scope,
+                "mediaScope": data.media_scope,
+                "reasonCodes": data.completeness_reason_codes,
+            },
         },
         "independentVerification": {
             "status": data.verification_status,
@@ -592,6 +619,7 @@ fn run_external_verifier(
         validate_trusted_fingerprint(fingerprint)?;
     }
     let mut command = Command::new(executable);
+    configure_hidden_child(&mut command);
     command.arg(bag);
     if let Some(fingerprint) = trusted_fingerprint {
         command.args(["--trusted-fingerprint", fingerprint]);
@@ -627,6 +655,17 @@ fn run_external_verifier(
     )?;
     Ok(report)
 }
+
+#[cfg(windows)]
+fn configure_hidden_child(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn configure_hidden_child(_command: &mut Command) {}
 
 fn run_bounded_command(
     command: &mut Command,
@@ -888,9 +927,9 @@ fn print_root_help() {
 仅开发测试命令（正式版不可用）:\n  discover  只读发现 Chrome/Edge 安装与运行状态\n  \
 launch-dedicated  启动空的非默认采集 Profile 并输出授权 endpoint\n  \
 targets   列出显式回环 CDP endpoint 上的 WhatsApp 页面\n  \
-inspect-target  固定只读探测一个页面是否满足被动 T0 能力契约\n  \
-  collect   对一个已确认 target 执行被动 T0 并封存证据包\n\n\
-生产采集器不包含发送消息、建群、任意 JavaScript、历史加载或媒体下载能力。",
+  inspect-target  固定只读探测一个页面是否满足已签名任务的能力契约\n  \
+  collect   对一个已确认 target 执行任务指定的只读模式并封存证据包\n\n\
+生产采集器不包含发送消息、建群、任意 JavaScript 或页面点击能力；综合任务可调用固定的 WhatsApp 历史/媒体读取器。",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -1059,6 +1098,11 @@ mod tests {
             signer_fingerprint: format!("sha256:{}", "b".repeat(64)),
             record_counts,
             unresolved_reference_count: 0,
+            completeness_overall: "partial".to_owned(),
+            local_snapshot: "partial".to_owned(),
+            history_scope: "stable_no_growth".to_owned(),
+            media_scope: "complete".to_owned(),
+            completeness_reason_codes: vec!["history_stable_no_growth".to_owned()],
             operator_id: "operator_001".to_owned(),
             authorization_reference: "synthetic-authorization".to_owned(),
             authorization_confirmed_at_utc: "2026-08-08T00:00:00.000Z".to_owned(),
@@ -1074,6 +1118,12 @@ mod tests {
                 .pointer("/observedScope/accountScope")
                 .and_then(Value::as_str),
             Some("unverifiable")
+        );
+        assert_eq!(
+            document
+                .pointer("/observedScope/completeness/overall")
+                .and_then(Value::as_str),
+            Some("partial")
         );
         let serialized = serde_json::to_string(&document)
             .unwrap_or_else(|error| panic!("serialize handoff document: {error}"));

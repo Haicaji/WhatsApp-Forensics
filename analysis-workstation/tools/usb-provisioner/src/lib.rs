@@ -13,8 +13,9 @@ use std::path::{Component, Path, PathBuf};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use portable_config::PortableBundle;
-use portable_config::provisioning::{
-    AssignmentTemplate, ProvisionRequest as PortableProvisionRequest, provision,
+use portable_config::{
+    AcquisitionMode, MediaPolicy, MediaPolicyMode,
+    provisioning::{AssignmentTemplate, ProvisionRequest as PortableProvisionRequest, provision},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -115,6 +116,10 @@ pub struct AssignmentTemplateDocument {
     pub valid_from_utc: String,
     /// Exclusive validity end.
     pub valid_until_utc: String,
+    /// Signed, non-editable field acquisition policy.
+    pub acquisition_mode: AcquisitionMode,
+    /// Workstation-signed media scheduling and resource policy.
+    pub media_policy: MediaPolicy,
     /// Human-facing target description.
     pub target_description: String,
 }
@@ -185,6 +190,30 @@ pub struct RegisteredAssignmentDigest {
     pub assignment_id: String,
     /// Complete signed assignment-file SHA-256.
     pub document_sha256: String,
+}
+
+/// Non-secret inventory returned after verifying an already deployed USB.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PortableBundleInspection {
+    /// Inspection contract identifier.
+    pub schema_version: String,
+    /// Signed portable bundle UUID.
+    pub bundle_id: Uuid,
+    /// Operator identifier from the signed profile.
+    pub operator_id: String,
+    /// Operator display name from the signed profile.
+    pub operator_display_name: String,
+    /// Operator evidence-key identifier.
+    pub operator_key_id: String,
+    /// Operator evidence-key fingerprint.
+    pub operator_key_fingerprint_sha256: String,
+    /// Workstation trust-anchor fingerprint embedded in the signed bundle.
+    pub workstation_key_fingerprint_sha256: String,
+    /// SHA-256 of the signed portable configuration manifest.
+    pub portable_manifest_sha256: String,
+    /// Cryptographically verified task identifiers, including expired tasks.
+    pub assignment_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -293,6 +322,8 @@ pub fn provision_usb(
                 issued_at_utc: parse_utc(&document.issued_at_utc)?,
                 valid_from_utc: parse_utc(&document.valid_from_utc)?,
                 valid_until_utc: parse_utc(&document.valid_until_utc)?,
+                acquisition_mode: document.acquisition_mode,
+                media_policy: document.media_policy,
                 target_description: document.target_description.clone(),
             })
         })
@@ -385,6 +416,40 @@ pub fn provision_usb(
         &receipt,
     )?;
     Ok(receipt)
+}
+
+/// Verifies an already deployed portable bundle without unlocking its private
+/// key and without treating assignment expiry as a software-maintenance error.
+///
+/// This function authenticates the signed configuration and task documents,
+/// validates the encrypted-key public fingerprint, and enforces the fixed
+/// portable path/reparse policy. It does not authorise an acquisition.
+///
+/// # Errors
+///
+/// Returns an error for an unsafe layout, tampered configuration, invalid
+/// signature, or inconsistent operator/key/task binding.
+pub fn inspect_portable_bundle(
+    collector_root: &Path,
+) -> Result<PortableBundleInspection, ProvisionerError> {
+    let bundle = PortableBundle::load_from_root_for_maintenance(collector_root)?;
+    let profile = bundle.profile();
+    let mut assignment_ids = bundle
+        .assignments_for_maintenance()
+        .map(|assignment| assignment.payload.assignment_id.clone())
+        .collect::<Vec<_>>();
+    assignment_ids.sort();
+    Ok(PortableBundleInspection {
+        schema_version: "wafc-portable-bundle-inspection/1".to_owned(),
+        bundle_id: bundle.bundle_id(),
+        operator_id: profile.operator_id.clone(),
+        operator_display_name: profile.display_name.clone(),
+        operator_key_id: profile.key_id.clone(),
+        operator_key_fingerprint_sha256: profile.evidence_signing_key_fingerprint_sha256.clone(),
+        workstation_key_fingerprint_sha256: bundle.workstation_key_fingerprint_sha256().to_owned(),
+        portable_manifest_sha256: bundle.manifest_sha256().to_owned(),
+        assignment_ids,
+    })
 }
 
 /// Reads one strict operator template from disk.
@@ -622,6 +687,25 @@ fn validate_assignment(assignment: &AssignmentTemplateDocument) -> Result<(), Pr
             "assignment validity window is invalid".to_owned(),
         ));
     }
+    let policy = assignment.media_policy;
+    let mode_valid = assignment.acquisition_mode.requests_enrichment()
+        || matches!(policy.mode, MediaPolicyMode::MetadataOnly);
+    if !mode_valid
+        || policy.max_asset_bytes == 0
+        || policy.max_asset_bytes > 32 * 1024 * 1024 * 1024
+        || policy.max_total_bytes < policy.max_asset_bytes
+        || policy.max_total_bytes > 32 * 1024 * 1024 * 1024 * 1024
+        || !(1..=300).contains(&policy.cache_lookup_timeout_seconds)
+        || !(5..=3_600).contains(&policy.no_progress_timeout_seconds)
+        || !(5..=7_200).contains(&policy.attempt_timeout_seconds)
+        || policy.max_asset_duration_seconds < policy.attempt_timeout_seconds
+        || policy.max_asset_duration_seconds > 86_400
+        || !(1..=5).contains(&policy.max_attempts)
+    {
+        return Err(ProvisionerError::InvalidInput(
+            "assignment media policy is invalid".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -724,8 +808,8 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    const WORKSTATION_PASSPHRASE: &str = "workstation-passphrase-2026";
-    const OPERATOR_PASSPHRASE: &str = "operator-passphrase-2026";
+    const WORKSTATION_PASSPHRASE: &str = "Workstation!Passphrase2026";
+    const OPERATOR_PASSPHRASE: &str = "Operator!Passphrase2026";
 
     fn fixed_time() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-08-08T00:00:00Z")
@@ -752,7 +836,11 @@ mod tests {
             issued_at_utc: "2026-08-08T00:00:00Z".to_owned(),
             valid_from_utc: "2026-08-08T00:00:00Z".to_owned(),
             valid_until_utc: "2026-08-09T00:00:00Z".to_owned(),
-            target_description: "Authorized passive T0".to_owned(),
+            acquisition_mode: AcquisitionMode::ComprehensiveReadonlyV02,
+            media_policy: MediaPolicy::for_acquisition_mode(
+                AcquisitionMode::ComprehensiveReadonlyV02,
+            ),
+            target_description: "Authorized comprehensive read-only acquisition".to_owned(),
         }
     }
 

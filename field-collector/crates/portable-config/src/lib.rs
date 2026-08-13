@@ -148,6 +148,108 @@ struct WorkstationTrust {
 }
 
 /// Workstation-signed task fields displayed to the operator.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AcquisitionMode {
+    /// Read only the records already materialized in the selected Web client.
+    PassiveT0,
+    /// Record a baseline, then use fixed Store-only history/media readers.
+    ComprehensiveReadonlyV02,
+}
+
+/// Workstation-signed media acquisition mode. Field operators can inspect but
+/// cannot change this policy.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaPolicyMode {
+    /// Observe only media bytes already present in the selected browser cache.
+    CachedOnly,
+    /// Permit the fixed `WhatsApp` read loader to request media; failures do not
+    /// discard successfully captured records or other media.
+    NetworkBestEffort,
+    /// Preserve attachment metadata without requesting media bytes.
+    MetadataOnly,
+}
+
+/// Signed media limits applied by the Rust Collector. Durations are seconds so
+/// the JSON contract remains portable across implementations.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MediaPolicy {
+    /// Whether bytes may be read only from cache, requested from `WhatsApp`, or omitted.
+    pub mode: MediaPolicyMode,
+    /// Maximum accepted bytes for one attachment.
+    pub max_asset_bytes: u64,
+    /// Maximum committed media bytes for the complete acquisition.
+    pub max_total_bytes: u64,
+    /// Time allowed for the Adapter's initial cache observation.
+    pub cache_lookup_timeout_seconds: u32,
+    /// Maximum interval without observable download or byte progress.
+    pub no_progress_timeout_seconds: u32,
+    /// Maximum time for one network-backed attempt.
+    pub attempt_timeout_seconds: u32,
+    /// Hard wall-clock limit across all attempts for one attachment.
+    pub max_asset_duration_seconds: u32,
+    /// Maximum number of network-backed attempts for one attachment.
+    pub max_attempts: u8,
+    /// Whether a terminal attachment failure permits the queue to continue.
+    pub continue_on_failure: bool,
+}
+
+impl MediaPolicy {
+    /// Safe Workstation default for the selected acquisition mode.
+    #[must_use]
+    pub const fn for_acquisition_mode(mode: AcquisitionMode) -> Self {
+        Self {
+            mode: match mode {
+                AcquisitionMode::PassiveT0 => MediaPolicyMode::MetadataOnly,
+                AcquisitionMode::ComprehensiveReadonlyV02 => MediaPolicyMode::NetworkBestEffort,
+            },
+            max_asset_bytes: 2 * 1024 * 1024 * 1024,
+            max_total_bytes: 20 * 1024 * 1024 * 1024,
+            cache_lookup_timeout_seconds: 10,
+            no_progress_timeout_seconds: 120,
+            attempt_timeout_seconds: 600,
+            max_asset_duration_seconds: 1_200,
+            max_attempts: 2,
+            continue_on_failure: true,
+        }
+    }
+
+    fn valid_for(self, acquisition_mode: AcquisitionMode) -> bool {
+        let mode_matches = acquisition_mode.requests_enrichment()
+            || matches!(self.mode, MediaPolicyMode::MetadataOnly);
+        mode_matches
+            && (1..=32 * 1024 * 1024 * 1024).contains(&self.max_asset_bytes)
+            && self.max_total_bytes >= self.max_asset_bytes
+            && self.max_total_bytes <= 32 * 1024 * 1024 * 1024 * 1024
+            && (1..=300).contains(&self.cache_lookup_timeout_seconds)
+            && (5..=3_600).contains(&self.no_progress_timeout_seconds)
+            && (5..=7_200).contains(&self.attempt_timeout_seconds)
+            && self.max_asset_duration_seconds >= self.attempt_timeout_seconds
+            && self.max_asset_duration_seconds <= 86_400
+            && (1..=5).contains(&self.max_attempts)
+    }
+}
+
+impl AcquisitionMode {
+    /// Stable signed string written to assignment and acquisition metadata.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PassiveT0 => "passive_t0",
+            Self::ComprehensiveReadonlyV02 => "comprehensive_readonly_v02",
+        }
+    }
+
+    /// Whether the mode may request network-backed history/media observation.
+    #[must_use]
+    pub const fn requests_enrichment(self) -> bool {
+        matches!(self, Self::ComprehensiveReadonlyV02)
+    }
+}
+
+/// Workstation-signed task fields displayed to the operator.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssignmentPayload {
@@ -167,8 +269,10 @@ pub struct AssignmentPayload {
     pub valid_from_utc: String,
     /// Exclusive validity end.
     pub valid_until_utc: String,
-    /// v1 accepts only `passive_t0`.
-    pub acquisition_mode: String,
+    /// Fixed acquisition policy;现场不得修改。
+    pub acquisition_mode: AcquisitionMode,
+    /// Signed media policy; never accepted from a field-side input control.
+    pub media_policy: MediaPolicy,
     /// Human-readable, signed target description.
     pub target_description: String,
 }
@@ -295,6 +399,32 @@ impl PortableBundle {
     /// Returns an error for unsafe paths, malformed files, invalid signatures,
     /// hash mismatches, assignment ownership mismatches, or unsupported fields.
     pub fn load_from_root(root: &Path, now: DateTime<Utc>) -> Result<Self, PortableConfigError> {
+        let bundle = Self::load_from_root_for_maintenance(root)?;
+        if !bundle
+            .assignments
+            .iter()
+            .any(|assignment| assignment.is_valid_at(now))
+        {
+            return Err(PortableConfigError::AssignmentUnavailable(
+                "no assignment is valid at the current UTC time".to_owned(),
+            ));
+        }
+        Ok(bundle)
+    }
+
+    /// Loads and verifies a portable root for Workstation-side maintenance.
+    ///
+    /// Unlike [`Self::load_from_root`], this entry point does not require a task
+    /// to be active at the current time. It still validates the complete signed
+    /// configuration, every assignment, the encrypted-key fingerprint binding,
+    /// fixed paths, and the reparse-point policy. It must not be used to
+    /// authorise acquisition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsafe paths, malformed files, invalid signatures,
+    /// hash mismatches, assignment ownership mismatches, or unsupported fields.
+    pub fn load_from_root_for_maintenance(root: &Path) -> Result<Self, PortableConfigError> {
         ensure_no_reparse_path(root)?;
         ensure_real_directory(root)?;
         let root = fs::canonicalize(root)?;
@@ -335,14 +465,6 @@ impl PortableBundle {
                 "portable bundle contains no assignments".to_owned(),
             ));
         }
-        if !assignments
-            .iter()
-            .any(|assignment| assignment.is_valid_at(now))
-        {
-            return Err(PortableConfigError::AssignmentUnavailable(
-                "no assignment is valid at the current UTC time".to_owned(),
-            ));
-        }
 
         let paths = resolved_paths(&root)?;
         Ok(Self {
@@ -377,6 +499,12 @@ impl PortableBundle {
     #[must_use]
     pub fn workstation_key_fingerprint_sha256(&self) -> &str {
         &self.trust.fingerprint_sha256
+    }
+
+    /// Iterates every cryptographically verified assignment regardless of its
+    /// validity window. This is only for Workstation inventory and maintenance.
+    pub fn assignments_for_maintenance(&self) -> impl Iterator<Item = &PortableAssignment> {
+        self.assignments.iter()
     }
 
     /// Safe executable-relative output paths.
@@ -637,7 +765,6 @@ fn load_assignments(
             || document.signature.key_id != trust.key_id
             || document.payload.operator_id != profile.operator_id
             || document.payload.allowed_key_id != profile.key_id
-            || document.payload.acquisition_mode != "passive_t0"
             || !valid_identifier(&document.payload.assignment_id)
             || document.payload.authorization_reference.is_empty()
             || document.payload.authorization_reference.len() > 240
@@ -648,6 +775,10 @@ fn load_assignments(
             || contains_control(&document.payload.authorization_reference)
             || contains_control(&document.payload.source_organization)
             || contains_control(&document.payload.target_description)
+            || !document
+                .payload
+                .media_policy
+                .valid_for(document.payload.acquisition_mode)
             || path != format!("assignments/{}.json", document.payload.assignment_id)
         {
             return Err(PortableConfigError::InvalidDocument(format!(
@@ -1002,7 +1133,7 @@ mod tests {
             workstation_id: "analysis-workstation-001".to_owned(),
             workstation_key_id: "workstation-config-key-001".to_owned(),
             workstation_signing_key: &workstation,
-            operator_key_passphrase: "correct horse battery staple",
+            operator_key_passphrase: "Correct!HorseBatteryStaple1",
             assignments: vec![provisioning::AssignmentTemplate {
                 assignment_id: "assignment-001".to_owned(),
                 authorization_reference: "CASE-2026-001".to_owned(),
@@ -1010,6 +1141,10 @@ mod tests {
                 issued_at_utc: instant(0),
                 valid_from_utc: instant(1),
                 valid_until_utc: instant(23),
+                acquisition_mode: AcquisitionMode::ComprehensiveReadonlyV02,
+                media_policy: MediaPolicy::for_acquisition_mode(
+                    AcquisitionMode::ComprehensiveReadonlyV02,
+                ),
                 target_description: "授权的 WhatsApp Web 页面".to_owned(),
             }],
             created_at_utc: instant(0),
@@ -1109,7 +1244,7 @@ mod tests {
         assert_eq!(bundle.profile().operator_id, "operator_001");
         assert_eq!(bundle.valid_assignments_at(instant(12)).count(), 1);
         let unlocked = bundle
-            .unlock_operator_key("correct horse battery staple")
+            .unlock_operator_key("Correct!HorseBatteryStaple1")
             .unwrap_or_else(|error| panic!("unlock: {error}"));
         assert_eq!(unlocked.binding.operator_id, "operator_001");
         assert_eq!(
@@ -1141,6 +1276,9 @@ mod tests {
             PortableBundle::load_from_root(&expired.0, instant(23)),
             Err(PortableConfigError::AssignmentUnavailable(_))
         ));
+        let maintained = PortableBundle::load_from_root_for_maintenance(&expired.0)
+            .unwrap_or_else(|error| panic!("maintenance validation: {error}"));
+        assert_eq!(maintained.assignments_for_maintenance().count(), 1);
     }
 
     #[test]
@@ -1227,7 +1365,7 @@ mod tests {
         let bundle = PortableBundle::load_from_root(&root.0, instant(12))
             .unwrap_or_else(|error| panic!("provisional signature check: {error}"));
         assert!(matches!(
-            bundle.unlock_operator_key("correct horse battery staple"),
+            bundle.unlock_operator_key("Correct!HorseBatteryStaple1"),
             Err(PortableConfigError::KeyBindingMismatch)
         ));
     }

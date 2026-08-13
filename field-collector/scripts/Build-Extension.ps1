@@ -23,6 +23,9 @@ foreach ($required in @(
     'manifest.json',
     'popup.html',
     'popup.js',
+    'modules\protocol.js',
+    'modules\adapter-loader.js',
+    'modules\command-policy.js',
     'service-worker.js',
     'styles.css'
 )) {
@@ -51,7 +54,6 @@ foreach ($sourceName in @(
     'manifest.json',
     'popup.html',
     'popup.js',
-    'service-worker.js',
     'styles.css'
 )) {
     [System.IO.File]::Copy(
@@ -60,6 +62,21 @@ foreach ($sourceName in @(
         $true
     )
 }
+$workerModules = @(
+    'modules\protocol.js',
+    'modules\adapter-loader.js',
+    'modules\command-policy.js',
+    'service-worker.js'
+)
+$workerSource = [string]::Join("`n", @($workerModules | ForEach-Object {
+    [System.IO.File]::ReadAllText((Join-Path $sourceRoot $_))
+}))
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+[System.IO.File]::WriteAllText(
+    (Join-Path $outputRoot 'service-worker.js'),
+    $workerSource.TrimEnd("`r", "`n") + "`n",
+    $utf8
+)
 [System.IO.File]::Copy(
     $adapterSource,
     (Join-Path $adapterOutput 'collector.iife.js'),
@@ -68,12 +85,12 @@ foreach ($sourceName in @(
 
 $adapterManifest = [ordered]@{
     schemaVersion = 'wafc-adapter-manifest/1'
-    adapterId = 'wa-private-collections-v1'
-    version = '1.0.0'
+    adapterId = 'wa-private-collections-v2'
+    version = '2.5.3'
+    bridgeProtocol = 'wafc-bridge/2'
     sha256 = 'sha256:' + $adapterHash.ToLowerInvariant()
 }
-$adapterJson = $adapterManifest | ConvertTo-Json -Depth 4
-$utf8 = [System.Text.UTF8Encoding]::new($false)
+$adapterJson = ($adapterManifest | ConvertTo-Json -Depth 4) -replace "`r`n", "`n"
 [System.IO.File]::WriteAllText(
     (Join-Path $adapterOutput 'adapter-manifest.json'),
     $adapterJson + "`n",

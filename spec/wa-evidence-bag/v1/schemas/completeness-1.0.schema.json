@@ -23,15 +23,29 @@
     "mediaCounts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["requested", "full", "thumbnail", "missing", "expired", "decryptError", "notRequested"],
+      "required": [
+        "requested", "available", "full", "thumbnail", "missing", "expired",
+        "decryptError", "downloadTimeout", "noProgressTimeout", "tooLarge",
+        "diskSpaceInsufficient", "hashMismatch", "transportInterrupted",
+        "canceled", "unavailable", "notAttempted"
+      ],
       "properties": {
         "requested": {"type": "integer", "minimum": 0},
+        "available": {"type": "integer", "minimum": 0},
         "full": {"type": "integer", "minimum": 0},
         "thumbnail": {"type": "integer", "minimum": 0},
         "missing": {"type": "integer", "minimum": 0},
         "expired": {"type": "integer", "minimum": 0},
         "decryptError": {"type": "integer", "minimum": 0},
-        "notRequested": {"type": "integer", "minimum": 0}
+        "downloadTimeout": {"type": "integer", "minimum": 0},
+        "noProgressTimeout": {"type": "integer", "minimum": 0},
+        "tooLarge": {"type": "integer", "minimum": 0},
+        "diskSpaceInsufficient": {"type": "integer", "minimum": 0},
+        "hashMismatch": {"type": "integer", "minimum": 0},
+        "transportInterrupted": {"type": "integer", "minimum": 0},
+        "canceled": {"type": "integer", "minimum": 0},
+        "unavailable": {"type": "integer", "minimum": 0},
+        "notAttempted": {"type": "integer", "minimum": 0}
       }
     },
     "crossChecks": {

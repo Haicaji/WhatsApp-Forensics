@@ -20,7 +20,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::{mpsc, oneshot, watch},
     task::JoinHandle,
-    time::timeout,
+    time::{Instant, MissedTickBehavior, interval_at, timeout},
 };
 use tokio_tungstenite::{
     WebSocketStream, accept_hdr_async_with_config,
@@ -44,6 +44,8 @@ const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
 const MAX_PAIR_ATTEMPTS: usize = 3;
 const CHANNEL_CAPACITY: usize = 256;
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+const MAX_MISSED_HEARTBEATS: u8 = 2;
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
 /// Relay setup and protocol errors. Messages never contain page-supplied data.
@@ -294,6 +296,10 @@ enum ClientMessage {
         protocol: String,
         reason: String,
     },
+    Heartbeat {
+        protocol: String,
+        nonce: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -316,6 +322,10 @@ enum ServerMessage {
     Abort {
         protocol: &'static str,
         reason: &'static str,
+    },
+    Heartbeat {
+        protocol: &'static str,
+        nonce: String,
     },
 }
 
@@ -585,6 +595,19 @@ async fn extension_io(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ExtensionTransportError> {
     let (mut sink, mut stream) = socket.split();
+    let first_heartbeat = Instant::now() + HEARTBEAT_INTERVAL;
+    let mut heartbeat = interval_at(first_heartbeat, HEARTBEAT_INTERVAL);
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut heartbeat_nonce = 0_u64;
+    let mut pending_heartbeat = None::<String>;
+    let mut missed_heartbeats = 0_u8;
+    // A valid CDP response/event proves the same bidirectional loopback relay
+    // is alive.  Media streaming can keep Chrome's extension worker busy
+    // enough for the dedicated heartbeat echo to be delayed, so liveness must
+    // not depend exclusively on that echo while useful protocol traffic is
+    // still arriving.
+    let mut inbound_activity_since_tick = false;
+    let mut heartbeat_enabled = true;
     loop {
         tokio::select! {
             changed = shutdown.changed() => {
@@ -598,6 +621,9 @@ async fn extension_io(
                     let _ = sink.send(Message::Close(None)).await;
                     return Ok(());
                 };
+                if matches!(&message, ServerMessage::Detach { .. } | ServerMessage::Abort { .. }) {
+                    heartbeat_enabled = false;
+                }
                 let encoded = serde_json::to_string(&message)
                     .map_err(|_| ExtensionTransportError::Protocol)?;
                 if encoded.len() > MAX_WIRE_MESSAGE_BYTES {
@@ -607,6 +633,32 @@ async fn extension_io(
                     .await
                     .map_err(|_| ExtensionTransportError::WebSocket)?;
             }
+            _ = heartbeat.tick() => {
+                if !heartbeat_enabled {
+                    continue;
+                }
+                if heartbeat_still_pending(
+                    pending_heartbeat.as_deref(),
+                    &mut missed_heartbeats,
+                    &mut inbound_activity_since_tick,
+                )? {
+                    continue;
+                }
+                let nonce = heartbeat_nonce.to_string();
+                heartbeat_nonce = heartbeat_nonce
+                    .checked_add(1)
+                    .ok_or(ExtensionTransportError::Protocol)?;
+                let encoded = serde_json::to_string(&ServerMessage::Heartbeat {
+                    protocol: PROTOCOL,
+                    nonce: nonce.clone(),
+                })
+                .map_err(|_| ExtensionTransportError::Protocol)?;
+                sink.send(Message::Text(encoded.into()))
+                    .await
+                    .map_err(|_| ExtensionTransportError::WebSocket)?;
+                pending_heartbeat = Some(nonce);
+                inbound_activity_since_tick = false;
+            }
             incoming = stream.next() => {
                 let Some(message) = incoming else {
                     return Err(ExtensionTransportError::Stopped);
@@ -614,21 +666,23 @@ async fn extension_io(
                 let message = message.map_err(|_| ExtensionTransportError::WebSocket)?;
                 match message {
                     Message::Text(text) => {
-                        if text.len() > MAX_WIRE_MESSAGE_BYTES {
-                            return Err(ExtensionTransportError::Protocol);
-                        }
-                        let decoded: ClientMessage = serde_json::from_str(&text)
-                            .map_err(|_| ExtensionTransportError::Protocol)?;
-                        if matches!(decoded, ClientMessage::Hello { .. }) {
-                            return Err(ExtensionTransportError::Protocol);
-                        }
-                        inbound.send(decoded).await.map_err(|_| ExtensionTransportError::Stopped)?;
+                        handle_extension_text(
+                            &text,
+                            &inbound,
+                            &mut pending_heartbeat,
+                            &mut missed_heartbeats,
+                        )
+                        .await?;
+                        inbound_activity_since_tick = true;
                     }
                     Message::Ping(value) => {
                         sink.send(Message::Pong(value)).await
                             .map_err(|_| ExtensionTransportError::WebSocket)?;
+                        inbound_activity_since_tick = true;
                     }
-                    Message::Pong(_) => {}
+                    Message::Pong(_) => {
+                        inbound_activity_since_tick = true;
+                    }
                     Message::Close(_) => return Ok(()),
                     Message::Binary(_) | Message::Frame(_) => {
                         return Err(ExtensionTransportError::Protocol);
@@ -637,6 +691,58 @@ async fn extension_io(
             }
         }
     }
+}
+
+async fn handle_extension_text(
+    text: &str,
+    inbound: &mpsc::Sender<ClientMessage>,
+    pending_heartbeat: &mut Option<String>,
+    missed_heartbeats: &mut u8,
+) -> Result<(), ExtensionTransportError> {
+    if text.len() > MAX_WIRE_MESSAGE_BYTES {
+        return Err(ExtensionTransportError::Protocol);
+    }
+    let decoded: ClientMessage =
+        serde_json::from_str(text).map_err(|_| ExtensionTransportError::Protocol)?;
+    match decoded {
+        ClientMessage::Heartbeat { protocol, nonce } => {
+            if protocol != PROTOCOL || pending_heartbeat.as_deref() != Some(nonce.as_str()) {
+                return Err(ExtensionTransportError::Protocol);
+            }
+            *pending_heartbeat = None;
+            *missed_heartbeats = 0;
+        }
+        ClientMessage::Hello { .. } => return Err(ExtensionTransportError::Protocol),
+        message => {
+            inbound
+                .send(message)
+                .await
+                .map_err(|_| ExtensionTransportError::Stopped)?;
+        }
+    }
+    Ok(())
+}
+
+fn heartbeat_still_pending(
+    pending: Option<&str>,
+    missed: &mut u8,
+    inbound_activity_since_tick: &mut bool,
+) -> Result<bool, ExtensionTransportError> {
+    if pending.is_none() {
+        *inbound_activity_since_tick = false;
+        return Ok(false);
+    }
+    if std::mem::take(inbound_activity_since_tick) {
+        *missed = 0;
+        return Ok(true);
+    }
+    *missed = missed
+        .checked_add(1)
+        .ok_or(ExtensionTransportError::Protocol)?;
+    if *missed >= MAX_MISSED_HEARTBEATS {
+        return Err(ExtensionTransportError::Stopped);
+    }
+    Ok(true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -982,7 +1088,9 @@ async fn relay_host_session(
                         }
                         break;
                     }
-                    ClientMessage::Hello { .. } => return Err(ExtensionTransportError::Protocol),
+                    ClientMessage::Hello { .. } | ClientMessage::Heartbeat { .. } => {
+                        return Err(ExtensionTransportError::Protocol);
+                    }
                 }
             }
         }
@@ -1218,6 +1326,66 @@ mod tests {
 
     #[test]
     fn version_hash_and_command_boundaries_are_fixed() {
+        assert_eq!(HEARTBEAT_INTERVAL, Duration::from_secs(15));
+        assert_eq!(MAX_MISSED_HEARTBEATS, 2);
+        let pending = Some("0");
+        let mut missed = 0;
+        let mut inbound_activity = false;
+        assert!(matches!(
+            heartbeat_still_pending(pending, &mut missed, &mut inbound_activity),
+            Ok(true)
+        ));
+        assert_eq!(missed, 1);
+        assert!(matches!(
+            heartbeat_still_pending(pending, &mut missed, &mut inbound_activity),
+            Err(ExtensionTransportError::Stopped)
+        ));
+
+        let mut missed_during_media = 1;
+        let mut media_response_arrived = true;
+        assert!(matches!(
+            heartbeat_still_pending(
+                pending,
+                &mut missed_during_media,
+                &mut media_response_arrived,
+            ),
+            Ok(true)
+        ));
+        assert_eq!(missed_during_media, 0);
+        assert!(!media_response_arrived);
+
+        // A long media stream may span many heartbeat intervals.  Every
+        // validated CDP response is liveness, so the relay stays open without
+        // weakening the two-quiet-interval failure boundary.
+        for _ in 0..20 {
+            media_response_arrived = true;
+            assert!(matches!(
+                heartbeat_still_pending(
+                    pending,
+                    &mut missed_during_media,
+                    &mut media_response_arrived,
+                ),
+                Ok(true)
+            ));
+            assert_eq!(missed_during_media, 0);
+        }
+        assert!(matches!(
+            heartbeat_still_pending(
+                pending,
+                &mut missed_during_media,
+                &mut media_response_arrived,
+            ),
+            Ok(true)
+        ));
+        assert_eq!(missed_during_media, 1);
+        assert!(matches!(
+            heartbeat_still_pending(
+                pending,
+                &mut missed_during_media,
+                &mut media_response_arrived,
+            ),
+            Err(ExtensionTransportError::Stopped)
+        ));
         assert!(valid_sha256(&format!("sha256:{}", "a".repeat(64))));
         assert!(!valid_sha256(&format!("sha256:{}", "A".repeat(64))));
         for allowed in [
@@ -1346,6 +1514,9 @@ mod tests {
                     let value: Value = serde_json::from_str(&text)?;
                     match value.get("kind").and_then(Value::as_str) {
                         Some("paired") => {}
+                        Some("heartbeat") => {
+                            echo_fake_heartbeat(&mut socket, &value).await?;
+                        }
                         Some("cdp_command") => {
                             let request_id = value
                                 .get("request_id")
@@ -1397,5 +1568,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    async fn echo_fake_heartbeat<S>(
+        socket: &mut WebSocketStream<S>,
+        value: &Value,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let nonce = value
+            .get("nonce")
+            .and_then(Value::as_str)
+            .ok_or("missing heartbeat nonce")?;
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&json!({
+                    "kind": "heartbeat",
+                    "protocol": PROTOCOL,
+                    "nonce": nonce,
+                }))?
+                .into(),
+            ))
+            .await?;
+        Ok(())
     }
 }

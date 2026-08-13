@@ -13,4 +13,3 @@ export {
   type WorkstationServiceOptions,
 } from "./service";
 export { EvidenceVerifier, type VerificationReport } from "./verifier";
-

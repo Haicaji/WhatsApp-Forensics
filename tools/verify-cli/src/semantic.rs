@@ -1075,10 +1075,27 @@ fn verify_completeness(
         .get("requested")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let unavailable = ["missing", "expired", "decryptError", "notRequested"]
-        .iter()
-        .filter_map(|name| declared.get(*name).and_then(Value::as_u64))
-        .sum::<u64>();
+    let unavailable = [
+        "missing",
+        "expired",
+        "decryptError",
+        "downloadTimeout",
+        "noProgressTimeout",
+        "tooLarge",
+        "diskSpaceInsufficient",
+        "hashMismatch",
+        "transportInterrupted",
+        "canceled",
+        "unavailable",
+        "notAttempted",
+    ]
+    .iter()
+    .filter_map(|name| declared.get(*name).and_then(Value::as_u64))
+    .sum::<u64>();
+    let not_attempted = declared
+        .get("notAttempted")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let media_scope = required_string(&completeness, "mediaScope", path)?;
     match media_scope {
         "complete" if unavailable != 0 => {
@@ -1087,7 +1104,7 @@ fn verify_completeness(
                 "complete media scope contains unavailable assets",
             ));
         }
-        "not_requested" if requested != 0 => {
+        "not_requested" if not_attempted != requested => {
             return Err(invalid(
                 "completeness_media_scope",
                 "not_requested media scope contains attempted assets",
@@ -1102,7 +1119,7 @@ fn verify_completeness(
     let media_causality_valid = match media_capability {
         "supported" => true,
         "degraded" => matches!(media_scope, "partial" | "not_requested"),
-        "unsupported" | "error" => media_scope == "not_requested" && requested == 0,
+        "unsupported" | "error" => media_scope == "not_requested" && not_attempted == requested,
         _ => false,
     };
     if !media_causality_valid {
@@ -1175,18 +1192,28 @@ fn collect_asset_refs(record: &Value, record_id: &str, output: &mut Vec<AssetRef
 fn media_counts(records: &[Value]) -> HashMap<&'static str, u64> {
     let mut counts = HashMap::from([
         ("requested", 0),
+        ("available", 0),
         ("full", 0),
         ("thumbnail", 0),
         ("missing", 0),
         ("expired", 0),
         ("decryptError", 0),
-        ("notRequested", 0),
+        ("downloadTimeout", 0),
+        ("noProgressTimeout", 0),
+        ("tooLarge", 0),
+        ("diskSpaceInsufficient", 0),
+        ("hashMismatch", 0),
+        ("transportInterrupted", 0),
+        ("canceled", 0),
+        ("unavailable", 0),
+        ("notAttempted", 0),
     ]);
     for record in records {
         let status = record.get("acquisitionStatus").and_then(Value::as_str);
         let role = record.get("role").and_then(Value::as_str);
-        if status != Some("not_requested") {
-            *counts.entry("requested").or_default() += 1;
+        *counts.entry("requested").or_default() += 1;
+        if status == Some("available") {
+            *counts.entry("available").or_default() += 1;
         }
         if status == Some("available") && role == Some("full") {
             *counts.entry("full").or_default() += 1;
@@ -1198,7 +1225,21 @@ fn media_counts(records: &[Value]) -> HashMap<&'static str, u64> {
             Some("missing") => *counts.entry("missing").or_default() += 1,
             Some("expired") => *counts.entry("expired").or_default() += 1,
             Some("decrypt_error") => *counts.entry("decryptError").or_default() += 1,
-            Some("not_requested") => *counts.entry("notRequested").or_default() += 1,
+            Some("download_timeout") => *counts.entry("downloadTimeout").or_default() += 1,
+            Some("no_progress_timeout") => {
+                *counts.entry("noProgressTimeout").or_default() += 1;
+            }
+            Some("too_large") => *counts.entry("tooLarge").or_default() += 1,
+            Some("disk_space_insufficient") => {
+                *counts.entry("diskSpaceInsufficient").or_default() += 1;
+            }
+            Some("hash_mismatch") => *counts.entry("hashMismatch").or_default() += 1,
+            Some("transport_interrupted") => {
+                *counts.entry("transportInterrupted").or_default() += 1;
+            }
+            Some("canceled") => *counts.entry("canceled").or_default() += 1,
+            Some("unavailable") => *counts.entry("unavailable").or_default() += 1,
+            Some("not_attempted") => *counts.entry("notAttempted").or_default() += 1,
             _ => {}
         }
     }

@@ -20,6 +20,7 @@
         "validFromUtc",
         "validUntilUtc",
         "acquisitionMode",
+        "mediaPolicy",
         "targetDescription"
       ],
       "properties": {
@@ -31,7 +32,35 @@
         "issuedAtUtc": { "$ref": "common-1.0.schema.json#/$defs/utcDateTime" },
         "validFromUtc": { "$ref": "common-1.0.schema.json#/$defs/utcDateTime" },
         "validUntilUtc": { "$ref": "common-1.0.schema.json#/$defs/utcDateTime" },
-        "acquisitionMode": { "const": "passive_t0" },
+        "acquisitionMode": {
+          "enum": ["passive_t0", "comprehensive_readonly_v02"]
+        },
+        "mediaPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "maxAssetBytes",
+            "maxTotalBytes",
+            "cacheLookupTimeoutSeconds",
+            "noProgressTimeoutSeconds",
+            "attemptTimeoutSeconds",
+            "maxAssetDurationSeconds",
+            "maxAttempts",
+            "continueOnFailure"
+          ],
+          "properties": {
+            "mode": {"enum": ["cached_only", "network_best_effort", "metadata_only"]},
+            "maxAssetBytes": {"type": "integer", "minimum": 1, "maximum": 34359738368},
+            "maxTotalBytes": {"type": "integer", "minimum": 1, "maximum": 35184372088832},
+            "cacheLookupTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 300},
+            "noProgressTimeoutSeconds": {"type": "integer", "minimum": 5, "maximum": 3600},
+            "attemptTimeoutSeconds": {"type": "integer", "minimum": 5, "maximum": 7200},
+            "maxAssetDurationSeconds": {"type": "integer", "minimum": 5, "maximum": 86400},
+            "maxAttempts": {"type": "integer", "minimum": 1, "maximum": 5},
+            "continueOnFailure": {"type": "boolean"}
+          }
+        },
         "targetDescription": { "type": "string", "minLength": 1, "maxLength": 500 }
       }
     },

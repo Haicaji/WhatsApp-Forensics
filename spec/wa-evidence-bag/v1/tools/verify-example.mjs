@@ -278,8 +278,12 @@ function verifyMedia(allRecords, sourceId) {
       const bytes = fs.readFileSync(fileAt(media.cas.path));
       assert(bytes.length === media.cas.byteLength, `CAS size mismatch: ${media.assetId}`);
       assert(sha256(bytes) === media.cas.digest, `CAS hash mismatch: ${media.assetId}`);
+      assert(media.acquisition.capturedByteLength === media.cas.byteLength, `Captured media size mismatch: ${media.assetId}`);
+      assert(media.acquisition.errorCode === null, `Available media contains an error: ${media.assetId}`);
     } else {
       assert(media.cas === null, `Unavailable media must not have CAS: ${media.assetId}`);
+      assert(media.acquisition.capturedByteLength === 0, `Unavailable media reports captured bytes: ${media.assetId}`);
+      assert(typeof media.acquisition.errorCode === "string", `Unavailable media lacks a terminal reason: ${media.assetId}`);
     }
   }
   for (const record of allRecords.filter((item) => item.recordType === "message")) {
@@ -354,13 +358,22 @@ function verifyCompleteness(mediaRecords, inventory, allRecords, sourceId) {
   const chatCompleteness = readNdjson(fileAt("data/completeness/chats.ndjson"));
   assert(completeness.sourceId === sourceId, "Completeness sourceId mismatch");
   const expectedMediaCounts = {
-    requested: mediaRecords.filter((record) => record.acquisitionStatus !== "not_requested").length,
+    requested: mediaRecords.length,
+    available: mediaRecords.filter((record) => record.acquisitionStatus === "available").length,
     full: mediaRecords.filter((record) => record.acquisitionStatus === "available" && record.role === "full").length,
     thumbnail: mediaRecords.filter((record) => record.acquisitionStatus === "available" && record.role === "thumbnail").length,
     missing: mediaRecords.filter((record) => record.acquisitionStatus === "missing").length,
     expired: mediaRecords.filter((record) => record.acquisitionStatus === "expired").length,
     decryptError: mediaRecords.filter((record) => record.acquisitionStatus === "decrypt_error").length,
-    notRequested: mediaRecords.filter((record) => record.acquisitionStatus === "not_requested").length,
+    downloadTimeout: mediaRecords.filter((record) => record.acquisitionStatus === "download_timeout").length,
+    noProgressTimeout: mediaRecords.filter((record) => record.acquisitionStatus === "no_progress_timeout").length,
+    tooLarge: mediaRecords.filter((record) => record.acquisitionStatus === "too_large").length,
+    diskSpaceInsufficient: mediaRecords.filter((record) => record.acquisitionStatus === "disk_space_insufficient").length,
+    hashMismatch: mediaRecords.filter((record) => record.acquisitionStatus === "hash_mismatch").length,
+    transportInterrupted: mediaRecords.filter((record) => record.acquisitionStatus === "transport_interrupted").length,
+    canceled: mediaRecords.filter((record) => record.acquisitionStatus === "canceled").length,
+    unavailable: mediaRecords.filter((record) => record.acquisitionStatus === "unavailable").length,
+    notAttempted: mediaRecords.filter((record) => record.acquisitionStatus === "not_attempted").length,
   };
   for (const [name, expected] of Object.entries(expectedMediaCounts)) {
     assert(completeness.mediaCounts[name] === expected, `Completeness media ${name} count mismatch`);
@@ -379,9 +392,12 @@ function verifyCompleteness(mediaRecords, inventory, allRecords, sourceId) {
   assert(completeness.crossChecks.normalizedRefsResolved === true, "Completeness reference cross-check is false");
   assert(completeness.crossChecks.differences.length === 0, "Completeness reports unresolved differences");
   if (completeness.mediaScope === "complete") {
-    assert(expectedMediaCounts.missing + expectedMediaCounts.expired + expectedMediaCounts.decryptError + expectedMediaCounts.notRequested === 0, "Complete media scope has unavailable assets");
+    const terminalUnavailable = Object.entries(expectedMediaCounts)
+      .filter(([name]) => !["requested", "available", "full", "thumbnail"].includes(name))
+      .reduce((total, [, count]) => total + count, 0);
+    assert(terminalUnavailable === 0, "Complete media scope has unavailable assets");
   } else if (completeness.mediaScope === "not_requested") {
-    assert(expectedMediaCounts.requested === 0, "not_requested media scope has attempted assets");
+    assert(expectedMediaCounts.notAttempted === expectedMediaCounts.requested, "not_requested media scope contains attempted assets");
   }
   const incompleteDatasets = inventory.datasets.filter((dataset) => !["empty", "complete_as_observed"].includes(dataset.result));
   if (completeness.overall === "complete_as_observed") {

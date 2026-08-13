@@ -48,6 +48,10 @@ enum RpcRequest {
         #[serde(rename = "createdAtUtc")]
         created_at_utc: chrono::DateTime<Utc>,
     },
+    InspectPortableBundle {
+        #[serde(rename = "collectorRoot")]
+        collector_root: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -161,6 +165,9 @@ fn execute_rpc(request: RpcRequest) -> Result<Value> {
             operator_passphrase.zeroize();
             Ok(serde_json::to_value(receipt?)?)
         }
+        RpcRequest::InspectPortableBundle { collector_root } => Ok(serde_json::to_value(
+            wafc_usb_provisioner::inspect_portable_bundle(&collector_root)?,
+        )?),
     }
 }
 
@@ -247,14 +254,31 @@ fn provision_usb_command(arguments: &[String]) -> Result<ExitCode> {
 
 fn read_passphrase(label: &str) -> Result<Zeroizing<String>> {
     let value = rpassword::prompt_password(format!("{label}: "))?;
-    if value.len() < 12 {
-        bail!("{label}至少需要 12 个 UTF-8 字节");
+    if value.chars().count() < 8 {
+        bail!("{label}至少需要 8 个字符");
+    }
+    if value.len() > 1024 {
+        bail!("{label}不能超过 1024 个 UTF-8 字节");
     }
     Ok(Zeroizing::new(value))
 }
 
 fn read_new_passphrase(label: &str) -> Result<Zeroizing<String>> {
     let first = read_passphrase(label)?;
+    if first.chars().any(char::is_control)
+        || !first
+            .chars()
+            .any(|character| character.is_ascii_uppercase())
+        || !first
+            .chars()
+            .any(|character| character.is_ascii_lowercase())
+        || !first.chars().any(|character| character.is_ascii_digit())
+        || !first
+            .chars()
+            .any(|character| character.is_ascii_punctuation())
+    {
+        bail!("{label}必须同时包含大写字母、小写字母、数字和符号");
+    }
     let mut second = Zeroizing::new(rpassword::prompt_password("再次输入口令: ")?);
     if first.as_str() != second.as_str() {
         second.zeroize();

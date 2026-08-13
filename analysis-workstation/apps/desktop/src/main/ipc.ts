@@ -10,7 +10,9 @@ import {
   createCaseInputSchema,
   identifierSchema,
   initializeWorkstationInputSchema,
+  inspectUsbSoftwareInputSchema,
   provisionUsbInputSchema,
+  updateUsbSoftwareInputSchema,
 } from "@wafc/domain";
 import type { WorkstationService } from "@wafc/workstation-core";
 
@@ -121,6 +123,12 @@ export function registerIpcHandlers(
   });
   handle(IPC_CHANNELS.provisionUsb, window, (input: unknown) =>
     service.provisionUsb(provisionUsbInputSchema.parse(input)),
+  );
+  handle(IPC_CHANNELS.inspectUsbSoftware, window, (input: unknown) =>
+    service.inspectUsbSoftware(inspectUsbSoftwareInputSchema.parse(input)),
+  );
+  handle(IPC_CHANNELS.updateUsbSoftware, window, (input: unknown) =>
+    service.updateUsbSoftware(updateUsbSoftwareInputSchema.parse(input)),
   );
   handle(
     IPC_CHANNELS.intakeUsb,

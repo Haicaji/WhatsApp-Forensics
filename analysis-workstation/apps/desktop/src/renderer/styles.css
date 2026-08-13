@@ -989,6 +989,67 @@ td small {
   background: var(--danger-soft);
 }
 
+.inline-alert--info {
+  border: 1px solid #cbd2f7;
+  color: #3730a3;
+  background: var(--primary-soft);
+}
+
+.inline-alert--success {
+  border: 1px solid #b9e4d5;
+  color: #0d7653;
+  background: var(--success-soft);
+}
+
+.software-update-summary dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--line);
+}
+
+.software-update-summary dl > div {
+  background: #fff;
+  padding: 10px 12px;
+}
+
+.software-update-summary dt,
+.software-update-summary dd {
+  margin: 0;
+}
+
+.software-update-summary dt {
+  color: var(--subtle);
+  font-size: 9px;
+}
+
+.software-update-summary dd {
+  margin-top: 3px;
+  color: var(--navy);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.confirmation-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  color: #384255;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.confirmation-row input {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  margin: 1px 0 0;
+}
+
 .onboarding-shell,
 .splash-screen,
 .fatal-screen {

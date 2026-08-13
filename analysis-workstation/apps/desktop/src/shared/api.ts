@@ -6,6 +6,7 @@ import type {
   CursorPage,
   ImportResult,
   InitializeWorkstationInput,
+  InspectUsbSoftwareInput,
   IntegritySummary,
   Message,
   MessageQuery,
@@ -15,6 +16,9 @@ import type {
   SearchQuery,
   SourceSummary,
   UsbIntakeResult,
+  UsbSoftwareInspection,
+  UsbSoftwareUpdateResult,
+  UpdateUsbSoftwareInput,
   WorkstationProfile,
 } from "@wafc/domain";
 
@@ -61,6 +65,12 @@ export interface WorkstationApi {
   chooseUsbRoot(): Promise<ApiResult<string | null>>;
   chooseEvidenceBag(): Promise<ApiResult<string | null>>;
   provisionUsb(input: ProvisionUsbInput): Promise<ApiResult<ProvisionUsbResult>>;
+  inspectUsbSoftware(
+    input: InspectUsbSoftwareInput,
+  ): Promise<ApiResult<UsbSoftwareInspection>>;
+  updateUsbSoftware(
+    input: UpdateUsbSoftwareInput,
+  ): Promise<ApiResult<UsbSoftwareUpdateResult>>;
   intakeUsb(caseId: string, usbRoot: string): Promise<ApiResult<UsbIntakeResult>>;
   intakeUsbAutomatically(usbRoot: string): Promise<ApiResult<UsbIntakeResult>>;
   importEvidence(caseId: string, bagPath: string): Promise<ApiResult<ImportResult>>;
@@ -95,6 +105,8 @@ export const IPC_CHANNELS = {
   chooseUsbRoot: "wafc:dialog:usb-root",
   chooseEvidenceBag: "wafc:dialog:evidence-bag",
   provisionUsb: "wafc:usb:provision",
+  inspectUsbSoftware: "wafc:usb:software:inspect",
+  updateUsbSoftware: "wafc:usb:software:update",
   intakeUsb: "wafc:usb:intake",
   intakeUsbAutomatically: "wafc:usb:intake-automatic",
   importEvidence: "wafc:evidence:import",

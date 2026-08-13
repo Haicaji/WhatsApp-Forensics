@@ -58,10 +58,13 @@ pub struct BrowserProfileObservation {
     /// Validated relative Chromium profile directory (`Default` or `Profile N`).
     pub directory_name: String,
     /// Installed browser executable selected during discovery.
+    #[serde(skip_serializing)]
     pub executable_path: PathBuf,
     /// Canonical user-data root containing `Local State`.
+    #[serde(skip_serializing)]
     pub user_data_dir: PathBuf,
     /// Canonical profile directory. This is GUI-local and must not enter logs.
+    #[serde(skip_serializing)]
     pub profile_dir: PathBuf,
     /// Domain-separated digest used in evidence metadata instead of the path.
     pub profile_reference_sha256: String,
@@ -76,14 +79,41 @@ pub struct BrowserProfileObservation {
 pub struct ExistingProfileLaunch {
     /// Product selected by the operator.
     pub product: BrowserProduct,
-    /// Process identifier returned by the normal browser launch request.
-    pub process_id: u32,
-    /// UTC launch-request time.
-    pub opened_at_utc: String,
+    /// Process identifier returned by the normal browser launch request. This
+    /// is absent when the operator confirms that the page was already open.
+    pub process_id: Option<u32>,
+    /// UTC launch-request time. This is absent when the Collector deliberately
+    /// did not issue another browser-open request.
+    pub opened_at_utc: Option<String>,
+    /// UTC time at which the page was opened or confirmed ready by the operator.
+    pub page_ready_at_utc: String,
+    /// How the selected Profile reached the page-ready step.
+    pub preparation: ProfilePagePreparation,
     /// Whether this browser product was already running before the request.
     pub browser_was_running: bool,
     /// Privacy-preserving selected-profile reference.
     pub profile_reference_sha256: String,
+}
+
+/// Operator-visible preparation route for the selected original Profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfilePagePreparation {
+    /// The Collector issued a normal browser request for `WhatsApp` Web.
+    CollectorRequestedOpen,
+    /// The operator confirmed that the corresponding page was already open.
+    OperatorConfirmedAlreadyOpen,
+}
+
+impl ProfilePagePreparation {
+    /// Stable value written into acquisition metadata.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CollectorRequestedOpen => "collector_requested_open",
+            Self::OperatorConfirmedAlreadyOpen => "operator_confirmed_already_open",
+        }
+    }
 }
 
 /// Discovers Chrome/Edge profiles from their ordinary per-user profile index.
@@ -140,10 +170,38 @@ pub fn open_existing_profile(
     let child = spawn_normal_profile_page(profile, "https://web.whatsapp.com/")?;
     let process_id = child.id();
     drop(child);
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
     Ok(ExistingProfileLaunch {
         product: profile.product,
-        process_id,
-        opened_at_utc: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        process_id: Some(process_id),
+        opened_at_utc: Some(now.clone()),
+        page_ready_at_utc: now,
+        preparation: ProfilePagePreparation::CollectorRequestedOpen,
+        browser_was_running: profile.browser_was_running,
+        profile_reference_sha256: profile.profile_reference_sha256.clone(),
+    })
+}
+
+/// Revalidates a selected Profile when the operator confirms that its
+/// `WhatsApp` Web page is already open.
+///
+/// This function never launches a process or navigates a page. The subsequent
+/// extension pairing remains the binding step for the current `WhatsApp` tab.
+///
+/// # Errors
+///
+/// Returns an error if the selected Profile observation changed or became
+/// unsafe after discovery.
+pub fn confirm_existing_profile_page(
+    profile: &BrowserProfileObservation,
+) -> Result<ExistingProfileLaunch, BrowserProfileError> {
+    validate_observation(profile)?;
+    Ok(ExistingProfileLaunch {
+        product: profile.product,
+        process_id: None,
+        opened_at_utc: None,
+        page_ready_at_utc: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        preparation: ProfilePagePreparation::OperatorConfirmedAlreadyOpen,
         browser_was_running: profile.browser_was_running,
         profile_reference_sha256: profile.profile_reference_sha256.clone(),
     })
@@ -417,6 +475,26 @@ mod tests {
     }
 
     #[test]
+    fn serialized_observation_never_exposes_local_paths() {
+        let (_root, observation, executable, user_data) = fixture();
+        let mut profiles = discover_for_root(&observation, &executable, &user_data)
+            .unwrap_or_else(|error| panic!("discover fixture: {error}"));
+        let profile = profiles.remove(0);
+        let encoded = serde_json::to_value(&profile)
+            .unwrap_or_else(|error| panic!("serialize observation: {error}"));
+        let object = encoded
+            .as_object()
+            .unwrap_or_else(|| panic!("observation must serialize as an object"));
+
+        for forbidden in ["executablePath", "userDataDir", "profileDir"] {
+            assert!(!object.contains_key(forbidden), "leaked {forbidden}");
+        }
+        let text = encoded.to_string();
+        assert!(!text.contains(&executable.display().to_string()));
+        assert!(!text.contains(&user_data.display().to_string()));
+    }
+
+    #[test]
     fn rejects_unbounded_or_malformed_profile_index() {
         let (_root, observation, executable, user_data) = fixture();
         fs::write(user_data.join("Local State"), br#"{"profile":{}}"#)
@@ -453,5 +531,25 @@ mod tests {
             validate_observation(&profile),
             Err(BrowserProfileError::ObservationChanged)
         ));
+    }
+
+    #[test]
+    fn already_open_confirmation_never_launches_or_invents_a_process() {
+        let (_root, observation, executable, user_data) = fixture();
+        let mut profiles = discover_for_root(&observation, &executable, &user_data)
+            .unwrap_or_else(|error| panic!("discover fixture: {error}"));
+        let profile = profiles.remove(0);
+        let confirmation = confirm_existing_profile_page(&profile)
+            .unwrap_or_else(|error| panic!("confirm existing page: {error}"));
+        assert_eq!(confirmation.process_id, None);
+        assert_eq!(confirmation.opened_at_utc, None);
+        assert_eq!(
+            confirmation.preparation,
+            ProfilePagePreparation::OperatorConfirmedAlreadyOpen
+        );
+        assert_eq!(
+            confirmation.profile_reference_sha256,
+            profile.profile_reference_sha256
+        );
     }
 }

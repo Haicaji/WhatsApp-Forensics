@@ -233,12 +233,21 @@ pub struct DatasetInventoryDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MediaCountsDto {
     pub requested: u64,
+    pub available: u64,
     pub full: u64,
     pub thumbnail: u64,
     pub missing: u64,
     pub expired: u64,
     pub decrypt_error: u64,
-    pub not_requested: u64,
+    pub download_timeout: u64,
+    pub no_progress_timeout: u64,
+    pub too_large: u64,
+    pub disk_space_insufficient: u64,
+    pub hash_mismatch: u64,
+    pub transport_interrupted: u64,
+    pub canceled: u64,
+    pub unavailable: u64,
+    pub not_attempted: u64,
 }
 
 /// Deterministic cross-check results.

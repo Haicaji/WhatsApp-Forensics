@@ -282,12 +282,25 @@ function Copy-ValidatedExtensionPayload {
     if ([string]::Join("`n", $actual) -cne [string]::Join("`n", $expected)) {
         throw "Built extension contains a stale or unexpected file. Run Build-Extension.ps1."
     }
-    foreach ($name in @("manifest.json", "popup.html", "popup.js", "service-worker.js", "styles.css")) {
+    foreach ($name in @("manifest.json", "popup.html", "popup.js", "styles.css")) {
         $sourceHash = (Get-FileHash -LiteralPath (Join-Path $sourceRoot $name) -Algorithm SHA256).Hash
         $builtHash = (Get-FileHash -LiteralPath (Join-Path $builtRoot $name) -Algorithm SHA256).Hash
         if ($sourceHash -cne $builtHash) {
             throw "Built extension shell is stale: $name"
         }
+    }
+    [string[]] $workerModules = @(
+        "modules\protocol.js",
+        "modules\adapter-loader.js",
+        "modules\command-policy.js",
+        "service-worker.js"
+    )
+    $expectedWorker = [string]::Join("`n", @($workerModules | ForEach-Object {
+        [System.IO.File]::ReadAllText((Join-Path $sourceRoot $_))
+    })).TrimEnd("`r", "`n") + "`n"
+    $builtWorker = [System.IO.File]::ReadAllText((Join-Path $builtRoot "service-worker.js"))
+    if ($expectedWorker -cne $builtWorker) {
+        throw "Built extension shell is stale: service-worker.js"
     }
     $developmentHash = (Get-FileHash -LiteralPath $adapterDevelopment -Algorithm SHA256).Hash.ToLowerInvariant()
     $adapterHash = (Get-FileHash -LiteralPath $adapterBuilt -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -298,11 +311,12 @@ function Copy-ValidatedExtensionPayload {
     $adapterManifest = Get-Content -LiteralPath (Join-Path $builtRoot "adapter\adapter-manifest.json") -Raw | ConvertFrom-Json
     [string[]] $manifestProperties = @($adapterManifest.PSObject.Properties.Name)
     [System.Array]::Sort($manifestProperties, [System.StringComparer]::Ordinal)
-    [string[]] $expectedProperties = @("adapterId", "schemaVersion", "sha256", "version")
+    [string[]] $expectedProperties = @("adapterId", "bridgeProtocol", "schemaVersion", "sha256", "version")
     if ([string]::Join("`n", $manifestProperties) -cne [string]::Join("`n", $expectedProperties) `
         -or [string] $adapterManifest.schemaVersion -cne "wafc-adapter-manifest/1" `
-        -or [string] $adapterManifest.adapterId -cne "wa-private-collections-v1" `
-        -or [string] $adapterManifest.version -cne "1.0.0" `
+        -or [string] $adapterManifest.adapterId -cne "wa-private-collections-v2" `
+        -or [string] $adapterManifest.version -cne "2.5.3" `
+        -or [string] $adapterManifest.bridgeProtocol -cne "wafc-bridge/2" `
         -or [string] $adapterManifest.sha256 -cne "sha256:$adapterHash") {
         throw "Adapter manifest does not bind the exact release Adapter."
     }
@@ -414,6 +428,55 @@ function Assert-WindowsExecutable {
     }
     finally {
         $stream.Dispose()
+    }
+}
+
+function Get-PeSubsystem {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    Assert-WindowsExecutable -Path $Path
+    $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    $reader = [System.IO.BinaryReader]::new($stream)
+    try {
+        if ($stream.Length -lt 256) {
+            throw "PE file is too short to contain an optional header: $Path"
+        }
+        $stream.Position = 0x3C
+        $peOffset = $reader.ReadUInt32()
+        if ($peOffset -gt ($stream.Length - 96)) {
+            throw "PE header offset is outside the executable: $Path"
+        }
+        $stream.Position = $peOffset
+        if ($reader.ReadUInt32() -ne 0x00004550) {
+            throw "PE signature is invalid: $Path"
+        }
+        $optionalHeader = [long] $peOffset + 24
+        $stream.Position = $optionalHeader
+        $magic = $reader.ReadUInt16()
+        $subsystemOffset = switch ($magic) {
+            0x010B { 68 }
+            0x020B { 68 }
+            default { throw "Unsupported PE optional-header magic 0x$($magic.ToString('X4')): $Path" }
+        }
+        $stream.Position = $optionalHeader + $subsystemOffset
+        return [int] $reader.ReadUInt16()
+    }
+    finally {
+        $reader.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Assert-PeSubsystem {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][int] $Expected,
+        [Parameter(Mandatory = $true)][string] $Description
+    )
+
+    $actual = Get-PeSubsystem -Path $Path
+    if ($actual -ne $Expected) {
+        throw "$Description has PE subsystem $actual; expected $Expected`: $Path"
     }
 }
 
@@ -742,6 +805,14 @@ function New-ReleaseManifest {
     )
     [System.Array]::Sort($payloadPaths, [System.StringComparer]::Ordinal)
 
+    $extensionManifestPath = Join-Path $PackageRoot "extension\manifest.json"
+    Assert-FileExists -Path $extensionManifestPath
+    $extensionManifest = Get-Content -LiteralPath $extensionManifestPath -Raw | ConvertFrom-Json
+    $extensionVersion = [string] $extensionManifest.version
+    if ($extensionVersion -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+        throw "Extension manifest does not contain a canonical semantic version."
+    }
+
     $files = @(
         foreach ($relativePath in $payloadPaths) {
             $nativeRelativePath = $relativePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
@@ -795,7 +866,7 @@ function New-ReleaseManifest {
             },
             [ordered]@{
                 name = "wafc-read-only-extension"
-                version = $CollectorVersion
+                version = $extensionVersion
                 manifest = "extension/manifest.json"
                 adapterManifest = "extension/adapter/adapter-manifest.json"
                 adapterSha256 = (Get-FileHash -LiteralPath (Join-Path $PackageRoot "extension\adapter\collector.iife.js") -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -1065,6 +1136,8 @@ try {
     $verifierExecutable = Join-Path $verifierRoot "target\release\waeb-verify.exe"
     Assert-WindowsExecutable -Path $collectorExecutable
     Assert-WindowsExecutable -Path $verifierExecutable
+    Assert-PeSubsystem -Path $collectorExecutable -Expected 2 -Description "Field Collector GUI"
+    Assert-PeSubsystem -Path $verifierExecutable -Expected 3 -Description "Independent verifier CLI"
     [string[]] $collectorImports = @(
         Assert-StaticWindowsCrt -Path $collectorExecutable -DumpbinPath $dumpbinPath
     )

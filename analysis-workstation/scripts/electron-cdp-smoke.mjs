@@ -152,8 +152,8 @@ if (mode === "onboarding") {
   await fillForm([
     "lab-ui-smoke-001",
     "workstation-config-ui-smoke-001",
-    "visual-smoke-passphrase-2026",
-    "visual-smoke-passphrase-2026",
+    "Visual!SmokePassphrase2026",
+    "Visual!SmokePassphrase2026",
   ]);
   await clickButton("初始化工作站");
   await waitForText("案件工作区", 30_000);

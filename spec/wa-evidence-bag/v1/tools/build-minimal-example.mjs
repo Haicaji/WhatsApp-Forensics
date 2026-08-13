@@ -357,7 +357,14 @@ function createPayload() {
     height: 1,
     durationMs: null,
     relatedAssetIds: [],
-    acquisition: {method: "blob_observed", attempts: 1, capturedAtUtc: CAPTURED_AT, errorCode: null},
+    acquisition: {
+      method: "blob_observed",
+      attempts: 0,
+      capturedAtUtc: CAPTURED_AT,
+      errorCode: null,
+      capturedByteLength: onePixelPng.length,
+      networkActionAttempted: false,
+    },
   };
   writeNdjson(path.join(DATA_DIR, "indexes", "media.ndjson"), [mediaRecord]);
 
@@ -435,7 +442,24 @@ function createPayload() {
     accountScope: "unverifiable",
     datasetInventoryPath: "data/dataset-inventory.json",
     chatCompletenessPath: "data/completeness/chats.ndjson",
-    mediaCounts: {requested: 1, full: 1, thumbnail: 0, missing: 0, expired: 0, decryptError: 0, notRequested: 0},
+    mediaCounts: {
+      requested: 1,
+      available: 1,
+      full: 1,
+      thumbnail: 0,
+      missing: 0,
+      expired: 0,
+      decryptError: 0,
+      downloadTimeout: 0,
+      noProgressTimeout: 0,
+      tooLarge: 0,
+      diskSpaceInsufficient: 0,
+      hashMismatch: 0,
+      transportInterrupted: 0,
+      canceled: 0,
+      unavailable: 0,
+      notAttempted: 0,
+    },
     crossChecks: {inventoryCountsMatch: true, mediaIndexMatchesCas: true, normalizedRefsResolved: true, differences: []},
     reasonCodes: ["history_not_requested", "optional_datasets_not_requested", "account_scope_unverifiable"],
   };

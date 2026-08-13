@@ -17,6 +17,10 @@ const api: WorkstationApi = {
   chooseEvidenceBag: () => ipcRenderer.invoke(IPC_CHANNELS.chooseEvidenceBag),
   provisionUsb: (input) =>
     ipcRenderer.invoke(IPC_CHANNELS.provisionUsb, input),
+  inspectUsbSoftware: (input) =>
+    ipcRenderer.invoke(IPC_CHANNELS.inspectUsbSoftware, input),
+  updateUsbSoftware: (input) =>
+    ipcRenderer.invoke(IPC_CHANNELS.updateUsbSoftware, input),
   intakeUsb: (caseId, usbRoot) =>
     ipcRenderer.invoke(IPC_CHANNELS.intakeUsb, caseId, usbRoot),
   intakeUsbAutomatically: (usbRoot) =>

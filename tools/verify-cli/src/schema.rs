@@ -615,7 +615,10 @@ mod tests {
             "acquisitionStatus":"available", "cas":null, "declaredMime":null,
             "detectedMime":null, "detector":null, "suggestedExtension":null,
             "originalFileName":null, "relatedAssetIds":[],
-            "acquisition":{"method":"not_attempted","attempts":0,"capturedAtUtc":null,"errorCode":null}
+            "acquisition":{
+                "method":"not_attempted", "attempts":0, "capturedAtUtc":null,
+                "errorCode":null, "capturedByteLength":0, "networkActionAttempted":false
+            }
         });
         assert!(
             validator

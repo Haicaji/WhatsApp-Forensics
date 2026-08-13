@@ -2,9 +2,11 @@ import type {
   ChatQuery,
   CreateCaseInput,
   InitializeWorkstationInput,
+  InspectUsbSoftwareInput,
   MessageQuery,
   ProvisionUsbInput,
   SearchQuery,
+  UpdateUsbSoftwareInput,
 } from "@wafc/domain";
 import { SqliteEvidenceRepository } from "@wafc/evidence-repository/node";
 
@@ -70,6 +72,14 @@ export class WorkstationService {
 
   provisionUsb(input: ProvisionUsbInput): Promise<ProvisionUsbResult> {
     return this.#provisioning.provisionUsb(input);
+  }
+
+  inspectUsbSoftware(input: InspectUsbSoftwareInput) {
+    return this.#provisioning.inspectUsbSoftware(input);
+  }
+
+  updateUsbSoftware(input: UpdateUsbSoftwareInput) {
+    return this.#provisioning.updateUsbSoftware(input);
   }
 
   importEvidence(caseId: string, bagPath: string) {

@@ -33,7 +33,7 @@ const SALT_BYTES: usize = 16;
 const NONCE_BYTES: usize = 24;
 #[cfg(any(test, feature = "provisioning"))]
 const SECRET_KEY_BYTES: usize = 32;
-const MIN_PASSPHRASE_BYTES: usize = 12;
+const MIN_PASSPHRASE_CHARACTERS: usize = 8;
 const MAX_PASSPHRASE_BYTES: usize = 1024;
 const ARGON2_MEMORY_KIB: u32 = 65_536;
 const ARGON2_ITERATIONS: u32 = 3;
@@ -47,9 +47,14 @@ pub enum KeystoreError {
     AlreadyExists(PathBuf),
     /// The passphrase is outside the accepted length range.
     #[error(
-        "passphrase must contain between {MIN_PASSPHRASE_BYTES} and {MAX_PASSPHRASE_BYTES} UTF-8 bytes"
+        "passphrase must contain at least {MIN_PASSPHRASE_CHARACTERS} characters and at most {MAX_PASSPHRASE_BYTES} UTF-8 bytes"
     )]
     InvalidPassphraseLength,
+    /// A newly created key passphrase does not include the required character classes.
+    #[error(
+        "a new key passphrase must contain an uppercase letter, a lowercase letter, a digit, and a symbol"
+    )]
+    WeakPassphrase,
     /// The file is larger than the defensive parser limit.
     #[error("keystore exceeds the {MAX_KEYSTORE_BYTES}-byte limit")]
     FileTooLarge,
@@ -177,7 +182,7 @@ pub fn create(
     passphrase: &str,
     binding: &KeystoreBinding,
 ) -> Result<CreatedKeystore, KeystoreError> {
-    validate_passphrase(passphrase)?;
+    validate_new_passphrase(passphrase)?;
     validate_binding(binding)?;
     let mut secret = Zeroizing::new([0_u8; SECRET_KEY_BYTES]);
     getrandom::fill(&mut *secret).map_err(|error| KeystoreError::Random(error.to_string()))?;
@@ -201,7 +206,7 @@ pub fn save(
     signing_key: &SigningKey,
     binding: &KeystoreBinding,
 ) -> Result<CreatedKeystore, KeystoreError> {
-    validate_passphrase(passphrase)?;
+    validate_new_passphrase(passphrase)?;
     validate_binding(binding)?;
     if path.exists() {
         return Err(KeystoreError::AlreadyExists(path.to_path_buf()));
@@ -282,7 +287,7 @@ pub fn save(
 /// Returns an error for an invalid/corrupt container, an incorrect passphrase,
 /// an unsupported parameter set, or an I/O/cryptographic failure.
 pub fn unlock(path: &Path, passphrase: &str) -> Result<UnlockedKeystore, KeystoreError> {
-    validate_passphrase(passphrase)?;
+    validate_unlock_passphrase(passphrase)?;
     let mut file = File::open(path)?;
     let metadata = file.metadata()?;
     if metadata.len() > MAX_KEYSTORE_BYTES {
@@ -372,10 +377,33 @@ pub fn inspect(path: &Path) -> Result<InspectedKeystore, KeystoreError> {
     })
 }
 
-fn validate_passphrase(passphrase: &str) -> Result<(), KeystoreError> {
-    let length = passphrase.len();
-    if !(MIN_PASSPHRASE_BYTES..=MAX_PASSPHRASE_BYTES).contains(&length) {
+fn validate_unlock_passphrase(passphrase: &str) -> Result<(), KeystoreError> {
+    if passphrase.chars().count() < MIN_PASSPHRASE_CHARACTERS
+        || passphrase.len() > MAX_PASSPHRASE_BYTES
+    {
         return Err(KeystoreError::InvalidPassphraseLength);
+    }
+    Ok(())
+}
+
+#[cfg(any(test, feature = "provisioning"))]
+fn validate_new_passphrase(passphrase: &str) -> Result<(), KeystoreError> {
+    validate_unlock_passphrase(passphrase)?;
+    if passphrase.chars().any(char::is_control)
+        || !passphrase
+            .chars()
+            .any(|character| character.is_ascii_uppercase())
+        || !passphrase
+            .chars()
+            .any(|character| character.is_ascii_lowercase())
+        || !passphrase
+            .chars()
+            .any(|character| character.is_ascii_digit())
+        || !passphrase
+            .chars()
+            .any(|character| character.is_ascii_punctuation())
+    {
+        return Err(KeystoreError::WeakPassphrase);
     }
     Ok(())
 }
@@ -513,7 +541,7 @@ mod tests {
     #[test]
     fn round_trip_and_wrong_password() {
         let path = temp_path("keystore-roundtrip");
-        let passphrase = "correct horse battery staple";
+        let passphrase = "Correct!HorseBatteryStaple1";
         let created = create(&path, passphrase, &binding());
         assert!(created.is_ok());
         let created = match created {
@@ -547,10 +575,10 @@ mod tests {
     #[test]
     fn refuses_overwrite() {
         let path = temp_path("keystore-overwrite");
-        let first = create(&path, "a sufficiently long passphrase", &binding());
+        let first = create(&path, "A!sufficiently-long-passphrase1", &binding());
         assert!(first.is_ok());
         assert!(matches!(
-            create(&path, "another sufficiently long passphrase", &binding()),
+            create(&path, "Another!sufficiently-long-passphrase1", &binding()),
             Err(KeystoreError::AlreadyExists(_))
         ));
         let _ = fs::remove_file(path);
@@ -560,16 +588,28 @@ mod tests {
     fn rejects_short_passphrase() {
         let path = temp_path("keystore-short");
         assert!(matches!(
-            create(&path, "too short", &binding()),
+            create(&path, "Aa!bcde", &binding()),
             Err(KeystoreError::InvalidPassphraseLength)
         ));
         assert!(!path.exists());
     }
 
     #[test]
+    fn enforces_new_key_character_classes_without_rejecting_legacy_unlock_shape() {
+        assert!(validate_new_passphrase("Aa!bcde1").is_ok());
+        for value in ["aa!bcde1", "AA!BCDE1", "Aa1bcdef", "Aa!bcdef"] {
+            assert!(matches!(
+                validate_new_passphrase(value),
+                Err(KeystoreError::WeakPassphrase)
+            ));
+        }
+        assert!(validate_unlock_passphrase("legacy-passphrase").is_ok());
+    }
+
+    #[test]
     fn encrypted_binding_tamper_is_rejected() {
         let path = temp_path("keystore-binding");
-        let passphrase = "a sufficiently long passphrase";
+        let passphrase = "A!sufficiently-long-passphrase1";
         assert!(create(&path, passphrase, &binding()).is_ok());
         let mut document: serde_json::Value = serde_json::from_slice(
             &fs::read(&path).unwrap_or_else(|error| panic!("read: {error}")),

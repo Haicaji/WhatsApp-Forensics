@@ -25,7 +25,9 @@ an `AUDITED_OVERRIDE/` path. Current mappings cover the standard `BSL-1.0` text
 for `clipboard-win 5.4.1` and the standard `Apache-2.0` text for exact locked
 GUI packages whose crate archives omit their repository-root license. For
 `MIT OR Apache-2.0` packages this release explicitly selects the Apache
-alternative. Future versions do not inherit any mapping.
+alternative. Exact AccessKit mappings additionally include its Chromium-derived
+BSD notice as a supplemental, independently hashed file. Future versions do not
+inherit any mapping.
 
 The release fails closed if a reachable third-party package:
 

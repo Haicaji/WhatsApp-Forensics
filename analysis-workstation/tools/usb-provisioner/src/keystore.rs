@@ -20,7 +20,7 @@ const MAX_DOCUMENT_BYTES: u64 = 64 * 1024;
 const SALT_BYTES: usize = 16;
 const NONCE_BYTES: usize = 24;
 const SECRET_BYTES: usize = 32;
-const MIN_PASSPHRASE_BYTES: usize = 12;
+const MIN_PASSPHRASE_CHARACTERS: usize = 8;
 const MAX_PASSPHRASE_BYTES: usize = 1024;
 const MEMORY_KIB: u32 = 65_536;
 const ITERATIONS: u32 = 3;
@@ -30,8 +30,14 @@ const PARALLELISM: u32 = 1;
 pub(crate) enum WorkstationKeyError {
     #[error("workstation key already exists: {0}")]
     AlreadyExists(PathBuf),
-    #[error("workstation key passphrase must contain 12 to 1024 UTF-8 bytes")]
-    InvalidPassphrase,
+    #[error(
+        "workstation key passphrase must contain at least 8 characters and at most 1024 UTF-8 bytes"
+    )]
+    InvalidPassphraseLength,
+    #[error(
+        "a new workstation key passphrase must contain an uppercase letter, a lowercase letter, a digit, and a symbol"
+    )]
+    WeakPassphrase,
     #[error("invalid or unsupported workstation key: {0}")]
     InvalidDocument(String),
     #[error("workstation key unlock failed")]
@@ -113,7 +119,7 @@ pub(crate) fn create(
     key_id: &str,
     passphrase: &str,
 ) -> Result<CreatedWorkstationKey, WorkstationKeyError> {
-    validate_passphrase(passphrase)?;
+    validate_new_passphrase(passphrase)?;
     if path.exists() {
         return Err(WorkstationKeyError::AlreadyExists(path.to_path_buf()));
     }
@@ -201,7 +207,7 @@ pub(crate) fn unlock(
     path: &Path,
     passphrase: &str,
 ) -> Result<CreatedWorkstationKey, WorkstationKeyError> {
-    validate_passphrase(passphrase)?;
+    validate_unlock_passphrase(passphrase)?;
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
@@ -352,12 +358,34 @@ fn decode_exact<const N: usize>(value: &str) -> Result<[u8; N], WorkstationKeyEr
         .map_err(|_| WorkstationKeyError::InvalidDocument("invalid field length".to_owned()))
 }
 
-fn validate_passphrase(passphrase: &str) -> Result<(), WorkstationKeyError> {
-    if (MIN_PASSPHRASE_BYTES..=MAX_PASSPHRASE_BYTES).contains(&passphrase.len()) {
-        Ok(())
-    } else {
-        Err(WorkstationKeyError::InvalidPassphrase)
+fn validate_unlock_passphrase(passphrase: &str) -> Result<(), WorkstationKeyError> {
+    if passphrase.chars().count() < MIN_PASSPHRASE_CHARACTERS
+        || passphrase.len() > MAX_PASSPHRASE_BYTES
+    {
+        return Err(WorkstationKeyError::InvalidPassphraseLength);
     }
+    Ok(())
+}
+
+fn validate_new_passphrase(passphrase: &str) -> Result<(), WorkstationKeyError> {
+    validate_unlock_passphrase(passphrase)?;
+    if passphrase.chars().any(char::is_control)
+        || !passphrase
+            .chars()
+            .any(|character| character.is_ascii_uppercase())
+        || !passphrase
+            .chars()
+            .any(|character| character.is_ascii_lowercase())
+        || !passphrase
+            .chars()
+            .any(|character| character.is_ascii_digit())
+        || !passphrase
+            .chars()
+            .any(|character| character.is_ascii_punctuation())
+    {
+        return Err(WorkstationKeyError::WeakPassphrase);
+    }
+    Ok(())
 }
 
 fn write_json_new<T: Serialize>(path: &Path, value: &T) -> Result<(), WorkstationKeyError> {
@@ -367,4 +395,29 @@ fn write_json_new<T: Serialize>(path: &Path, value: &T) -> Result<(), Workstatio
     file.write_all(&bytes)?;
     file.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WorkstationKeyError, validate_new_passphrase, validate_unlock_passphrase};
+
+    #[test]
+    fn new_key_policy_accepts_eight_characters_with_required_classes() {
+        assert!(validate_new_passphrase("Aa!bcde1").is_ok());
+    }
+
+    #[test]
+    fn new_key_policy_rejects_short_and_weak_values_but_unlock_is_compatible() {
+        assert!(matches!(
+            validate_new_passphrase("Aa!bcde"),
+            Err(WorkstationKeyError::InvalidPassphraseLength)
+        ));
+        for value in ["aa!bcde1", "AA!BCDE1", "Aa1bcdef", "Aa!bcdef"] {
+            assert!(matches!(
+                validate_new_passphrase(value),
+                Err(WorkstationKeyError::WeakPassphrase)
+            ));
+        }
+        assert!(validate_unlock_passphrase("legacy-passphrase").is_ok());
+    }
 }

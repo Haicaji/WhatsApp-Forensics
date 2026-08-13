@@ -13,7 +13,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.6"
 edition = "2024"
 rust-version = "1.89"
 license = "AGPL-3.0-only"
@@ -26,13 +26,14 @@ base64 = "=0.22.1"
 chacha20poly1305 = { version = "=0.10.1", features = ["std"] }
 chrono = { version = "=0.4.41", default-features = false, features = ["clock", "serde", "std"] }
 ed25519-dalek = { version = "=3.0.0", features = ["alloc", "pkcs8", "rand_core"] }
-eframe = { version = "=0.33.3", default-features = false, features = ["glow"] }
+eframe = { version = "=0.33.3", default-features = false, features = ["accesskit", "glow"] }
 futures-util = "=0.3.31"
 getrandom = "=0.4.3"
 getopts = "=0.2.23"
 hex = "=0.4.3"
 rpassword = "=7.4.0"
 serde = { version = "=1.0.219", features = ["derive"] }
+serde_jcs = "=0.1.0"
 serde_json = "=1.0.143"
 sha2 = "=0.10.9"
 subtle = "=2.6.1"

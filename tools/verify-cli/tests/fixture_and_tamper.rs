@@ -261,7 +261,7 @@ fn verifies_reference_fixture_as_untrusted_and_trusted() -> Result<(), Box<dyn s
     assert!(!untrusted.signature.trusted);
     assert_eq!(
         untrusted.manifest_root_sha256,
-        "5d32ea6188e95a8203df277dc3054d71ab086c759144b555f9dd4ae34aae798d"
+        "d03d16d35e10d0b8375f3133b73fe83f7ba1f0f031d7db4a3a97f06a8f605ed9"
     );
 
     let trusted = verify_directory(&fixture(), &[FIXTURE_FINGERPRINT.to_owned()])?;

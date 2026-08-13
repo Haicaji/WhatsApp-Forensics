@@ -17,6 +17,7 @@ import {
   LockKeyhole,
   MessageSquareText,
   Plus,
+  RefreshCw,
   Search,
   ShieldCheck,
   Usb,
@@ -40,6 +41,7 @@ import type {
   Message,
   SearchHit,
   SourceSummary,
+  UsbSoftwareInspection,
 } from "@wafc/domain";
 
 import type {
@@ -138,20 +140,22 @@ function Modal({
   onClose,
   children,
   wide = false,
+  closeDisabled = false,
 }: {
   title: string;
   description?: string;
   onClose: () => void;
   children: ReactNode;
   wide?: boolean;
+  closeDisabled?: boolean;
 }) {
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && !closeDisabled) onClose();
     };
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
-  }, [onClose]);
+  }, [closeDisabled, onClose]);
   return (
     <div className="modal-backdrop" role="presentation">
       <section
@@ -170,6 +174,7 @@ function Modal({
             type="button"
             aria-label="关闭"
             onClick={onClose}
+            disabled={closeDisabled}
           >
             <X size={20} />
           </button>
@@ -263,14 +268,17 @@ function Onboarding({
               />
             </Field>
           </div>
-          <Field label="工作站密钥口令" hint="至少 12 个字符；不会写入日志或数据库。">
+          <Field
+            label="工作站密钥口令"
+            hint="至少 8 个字符，并包含大写字母、小写字母、数字和符号；不会写入日志或数据库。"
+          >
             <input
               type="password"
               autoComplete="new-password"
               value={passphrase}
               onChange={(event) => setPassphrase(event.target.value)}
               required
-              minLength={12}
+              minLength={8}
             />
           </Field>
           <Field label="再次输入口令">
@@ -280,7 +288,7 @@ function Onboarding({
               value={confirmation}
               onChange={(event) => setConfirmation(event.target.value)}
               required
-              minLength={12}
+              minLength={8}
             />
           </Field>
           {error ? <div className="inline-alert inline-alert--error">{error}</div> : null}
@@ -408,7 +416,7 @@ function ProvisionUsbModal({
     assignmentId: `${caseSummary.caseId}-task-001`,
     validFrom: toLocalInput(new Date(now.getTime() + 5 * 60_000)),
     validUntil: toLocalInput(new Date(now.getTime() + 7 * 24 * 60 * 60_000)),
-    targetDescription: "经授权的 WhatsApp Web 被动 T0 现场采集",
+    targetDescription: "经授权的 WhatsApp Web 综合只读现场采集",
     workstationPassphrase: "",
     operatorPassphrase: "",
     operatorPassphraseConfirmation: "",
@@ -447,6 +455,18 @@ function ProvisionUsbModal({
             sourceOrganization: caseSummary.organization,
             validFromUtc: new Date(form.validFrom).toISOString(),
             validUntilUtc: new Date(form.validUntil).toISOString(),
+            acquisitionMode: "comprehensive_readonly_v02",
+            mediaPolicy: {
+              mode: "network_best_effort",
+              maxAssetBytes: 2_147_483_648,
+              maxTotalBytes: 21_474_836_480,
+              cacheLookupTimeoutSeconds: 10,
+              noProgressTimeoutSeconds: 120,
+              attemptTimeoutSeconds: 600,
+              maxAssetDurationSeconds: 1_200,
+              maxAttempts: 2,
+              continueOnFailure: true,
+            },
             targetDescription: form.targetDescription,
           },
           workstationPassphrase: form.workstationPassphrase,
@@ -544,7 +564,10 @@ function ProvisionUsbModal({
             </div>
           </div>
           <div className="form-grid">
-            <Field label="任务编号">
+            <Field
+              label="任务编号"
+              hint="直接填写现场任务编号即可；程序会自动生成安全文件名，无需输入 assignment- 前缀。"
+            >
               <input
                 value={form.assignmentId}
                 onChange={(event) => setForm({ ...form, assignmentId: event.target.value })}
@@ -598,11 +621,14 @@ function ProvisionUsbModal({
                 setForm({ ...form, workstationPassphrase: event.target.value })
               }
               required
-              minLength={12}
+              minLength={8}
             />
           </Field>
           <div className="form-grid">
-            <Field label="新勘察员密钥口令">
+            <Field
+              label="新勘察员密钥口令"
+              hint="至少 8 个字符，并包含大写字母、小写字母、数字和符号。"
+            >
               <input
                 type="password"
                 autoComplete="new-password"
@@ -611,7 +637,7 @@ function ProvisionUsbModal({
                   setForm({ ...form, operatorPassphrase: event.target.value })
                 }
                 required
-                minLength={12}
+                minLength={8}
               />
             </Field>
             <Field label="再次输入勘察员口令">
@@ -626,7 +652,7 @@ function ProvisionUsbModal({
                   })
                 }
                 required
-                minLength={12}
+                minLength={8}
               />
             </Field>
           </div>
@@ -639,6 +665,181 @@ function ProvisionUsbModal({
           <Button type="submit" busy={busy} icon={<HardDriveDownload size={17} />}>
             生成完整取证 U 盘
           </Button>
+        </footer>
+      </form>
+    </Modal>
+  );
+}
+
+function UpdateUsbSoftwareModal({
+  onClose,
+  onComplete,
+}: {
+  onClose: () => void;
+  onComplete: (message: string) => void;
+}) {
+  const [usbRoot, setUsbRoot] = useState("");
+  const [inspection, setInspection] = useState<UsbSoftwareInspection | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [busyAction, setBusyAction] = useState<"inspect" | "update" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function chooseAndInspect() {
+    setError(null);
+    setInspection(null);
+    setConfirmed(false);
+    try {
+      const selected = unwrap(await window.wafc.chooseUsbRoot());
+      if (!selected) return;
+      setUsbRoot(selected);
+      setBusyAction("inspect");
+      setInspection(
+        unwrap(await window.wafc.inspectUsbSoftware({ usbRoot: selected })),
+      );
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : "无法检查取证 U 盘软件",
+      );
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function updateSoftware(event: FormEvent) {
+    event.preventDefault();
+    if (!inspection || !usbRoot) return;
+    if (!confirmed) {
+      setError("请先确认 Field Collector 已关闭并保持 U 盘连接稳定");
+      return;
+    }
+    setBusyAction("update");
+    setError(null);
+    try {
+      const result = unwrap(
+        await window.wafc.updateUsbSoftware({ usbRoot }),
+      );
+      onComplete(
+        result.status === "already_current"
+          ? `该取证 U 盘已经是当前版本 ${result.newReleaseVersion}。`
+          : `取证 U 盘软件已从 ${result.previousReleaseVersion} 更新到 ${result.newReleaseVersion}；任务、密钥和证据均已保留。下次采集前，请在浏览器扩展管理页点击一次“重新加载”。${
+              result.cleanupPending
+                ? "旧程序仍被占用，已保留安全备份；关闭旧 Collector 后可在下次更新时自动恢复清理。"
+                : ""
+            }`,
+      );
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "取证 U 盘软件更新失败");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  const busy = busyAction !== null;
+  return (
+    <Modal
+      title="更新已部署 U 盘软件"
+      description="只更新采集程序、独立校验器、浏览器扩展和 Adapter，不重新签发任务或密钥。"
+      onClose={onClose}
+      closeDisabled={busy}
+    >
+      <form className="form-stack modal__body" onSubmit={updateSoftware}>
+        <section className="form-section">
+          <div className="section-heading">
+            <span>1</span>
+            <div>
+              <h3>选择已经部署任务的取证 U 盘</h3>
+              <p>程序会验证配置签名、勘察员身份、任务清单和当前软件清单。</p>
+            </div>
+          </div>
+          <div className="path-picker">
+            <code>{usbRoot || "尚未选择"}</code>
+            <Button
+              type="button"
+              variant="secondary"
+              icon={<Usb size={17} />}
+              busy={busyAction === "inspect"}
+              disabled={busy}
+              onClick={() => void chooseAndInspect()}
+            >
+              选择并检查
+            </Button>
+          </div>
+        </section>
+
+        {inspection ? (
+          <section className="form-section software-update-summary">
+            <div className="section-heading">
+              <span>2</span>
+              <div>
+                <h3>确认版本与保留内容</h3>
+                <p>只有当前 Workstation 信任身份签发且未被篡改的 U 盘才能更新。</p>
+              </div>
+            </div>
+            <dl>
+              <div>
+                <dt>勘察员</dt>
+                <dd>{inspection.operatorDisplayName}</dd>
+              </div>
+              <div>
+                <dt>签名任务</dt>
+                <dd>{inspection.assignmentIds.length} 个</dd>
+              </div>
+              <div>
+                <dt>当前版本</dt>
+                <dd>{inspection.currentReleaseVersion}</dd>
+              </div>
+              <div>
+                <dt>可用版本</dt>
+                <dd>{inspection.availableReleaseVersion}</dd>
+              </div>
+            </dl>
+            <div
+              className={`inline-alert ${
+                inspection.updateNeeded
+                  ? "inline-alert--info"
+                  : "inline-alert--success"
+              }`}
+            >
+              {inspection.updateNeeded
+                ? "可以更新。勘察员身份、加密私钥、签名任务、已有 Evidence Bag、交接摘要和诊断记录都会原样保留。"
+                : "软件和内置清单已经是当前版本，无需重复更新。"}
+            </div>
+            {inspection.updateNeeded ? (
+              <p className="field__hint">
+                扩展文件会一并更新；已加载过该 U 盘扩展的浏览器需要在下次采集前点击一次“重新加载”。
+              </p>
+            ) : null}
+            {inspection.updateNeeded ? (
+              <label className="confirmation-row">
+                <input
+                  type="checkbox"
+                  checked={confirmed}
+                  disabled={busy}
+                  onChange={(event) => setConfirmed(event.target.checked)}
+                />
+                <span>
+                  我已关闭此 U 盘中的 Field Collector，并会在更新完成前保持 U 盘连接稳定。
+                </span>
+              </label>
+            ) : null}
+          </section>
+        ) : null}
+
+        {error ? <div className="inline-alert inline-alert--error">{error}</div> : null}
+        <footer className="modal__actions modal__actions--sticky">
+          <Button type="button" variant="secondary" disabled={busy} onClick={onClose}>
+            {inspection && !inspection.updateNeeded ? "关闭" : "取消"}
+          </Button>
+          {inspection?.updateNeeded ? (
+            <Button
+              type="submit"
+              busy={busyAction === "update"}
+              disabled={!confirmed || busy}
+              icon={<RefreshCw size={17} />}
+            >
+              校验并更新软件
+            </Button>
+          ) : null}
         </footer>
       </form>
     </Modal>
@@ -1250,11 +1451,13 @@ function CaseWorkspace({
   caseSummary,
   onBack,
   onRefresh,
+  onUpdateUsb,
   notify,
 }: {
   caseSummary: CaseSummary;
   onBack: () => void;
   onRefresh: () => Promise<void>;
+  onUpdateUsb: () => void;
   notify: (notice: Notice) => void;
 }) {
   const [tab, setTab] = useState<CaseTab>("overview");
@@ -1351,6 +1554,13 @@ function CaseWorkspace({
         <div className="case-header__actions">
           <Button
             variant="secondary"
+            icon={<RefreshCw size={17} />}
+            onClick={onUpdateUsb}
+          >
+            更新 U 盘
+          </Button>
+          <Button
+            variant="secondary"
             icon={<FolderInput size={17} />}
             busy={busyAction === "import"}
             onClick={importBag}
@@ -1411,12 +1621,14 @@ function CaseList({
   onSelect,
   onCreate,
   onIntakeUsb,
+  onUpdateUsb,
   intakeBusy,
 }: {
   cases: CaseSummary[];
   onSelect: (caseSummary: CaseSummary) => void;
   onCreate: () => void;
   onIntakeUsb: () => void;
+  onUpdateUsb: () => void;
   intakeBusy: boolean;
 }) {
   return (
@@ -1428,6 +1640,13 @@ function CaseList({
           <p>创建案件、签发取证 U 盘并归档经可信校验的现场证据。</p>
         </div>
         <div className="page-header__actions">
+          <Button
+            variant="secondary"
+            icon={<RefreshCw size={17} />}
+            onClick={onUpdateUsb}
+          >
+            更新取证 U 盘
+          </Button>
           <Button
             variant="secondary"
             icon={<Usb size={17} />}
@@ -1503,6 +1722,7 @@ export function App() {
   const [fatalError, setFatalError] = useState<string | null>(null);
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
   const [showCreateCase, setShowCreateCase] = useState(false);
+  const [showUpdateUsb, setShowUpdateUsb] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [intakeBusy, setIntakeBusy] = useState(false);
 
@@ -1622,6 +1842,7 @@ export function App() {
           caseSummary={selectedCase}
           onBack={() => setSelectedCaseId(null)}
           onRefresh={loadStatus}
+          onUpdateUsb={() => setShowUpdateUsb(true)}
           notify={setNotice}
         />
       ) : (
@@ -1630,6 +1851,7 @@ export function App() {
           onSelect={(caseSummary) => setSelectedCaseId(caseSummary.caseId)}
           onCreate={() => setShowCreateCase(true)}
           onIntakeUsb={() => void intakeUsbAutomatically()}
+          onUpdateUsb={() => setShowUpdateUsb(true)}
           intakeBusy={intakeBusy}
         />
       )}
@@ -1640,6 +1862,15 @@ export function App() {
             setShowCreateCase(false);
             void loadStatus().then(() => setSelectedCaseId(created.caseId));
             setNotice({ kind: "success", message: `案件 ${created.caseId} 已创建。` });
+          }}
+        />
+      ) : null}
+      {showUpdateUsb ? (
+        <UpdateUsbSoftwareModal
+          onClose={() => setShowUpdateUsb(false)}
+          onComplete={(message) => {
+            setShowUpdateUsb(false);
+            setNotice({ kind: "success", message });
           }}
         />
       ) : null}

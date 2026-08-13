@@ -5,19 +5,30 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
+  rmSync,
+  writeFileSync,
 } from "node:fs";
 import { dirname, join, posix, resolve } from "node:path";
 
 import {
   type InitializeWorkstationInput,
+  type InspectUsbSoftwareInput,
   type ProvisionUsbInput,
   type ProvisioningReceipt,
+  type UpdateUsbSoftwareInput,
+  type UsbSoftwareInspection,
+  type UsbSoftwareUpdateResult,
   type WorkstationProfile,
   initializeWorkstationInputSchema,
+  inspectUsbSoftwareInputSchema,
   provisionUsbInputSchema,
   provisioningReceiptSchema,
+  updateUsbSoftwareInputSchema,
+  usbSoftwareInspectionSchema,
+  usbSoftwareUpdateResultSchema,
   workstationProfileSchema,
 } from "@wafc/domain";
 import { z } from "zod";
@@ -31,10 +42,30 @@ import {
 import { runJsonRpc } from "./process";
 
 const COLLECTOR_DIRECTORY_NAME = "Field Collector";
+const UPDATE_JOURNAL_NAME = ".Field Collector.software-update.json";
+const PRESERVED_PORTABLE_ENTRIES = [
+  "wafc-portable.json",
+  "config",
+  "assignments",
+  "evidence",
+  "handoff",
+  "diagnostics",
+] as const;
+const PRESERVED_RESULT_ENTRIES = [
+  "wafc-portable.json",
+  "config/operator-profile.json",
+  "config/operator-key.enc",
+  "config/workstation-trust.json",
+  "config/bundle-manifest.json",
+  "assignments/",
+  "evidence/",
+  "handoff/",
+  "diagnostics/",
+] as const;
 
 const releaseManifestSchema = z.object({
-  schemaVersion: z.string(),
-  releaseVersion: z.string(),
+  schemaVersion: z.string().min(1).max(120),
+  releaseVersion: z.string().min(1).max(80),
   source: z.object({
     publishable: z.boolean(),
   }),
@@ -49,6 +80,40 @@ const releaseManifestSchema = z.object({
     .min(2)
     .max(256),
 });
+
+const portableBundleInspectionSchema = z.object({
+  schemaVersion: z.literal("wafc-portable-bundle-inspection/1"),
+  bundleId: z.uuid(),
+  operatorId: z.string().min(3).max(80),
+  operatorDisplayName: z.string().min(1).max(160),
+  operatorKeyId: z.string().min(3).max(120),
+  operatorKeyFingerprintSha256: z
+    .string()
+    .regex(/^sha256:[0-9a-f]{64}$/u),
+  workstationKeyFingerprintSha256: z
+    .string()
+    .regex(/^sha256:[0-9a-f]{64}$/u),
+  portableManifestSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+  assignmentIds: z.array(z.string().min(3).max(120)).min(1).max(1000),
+});
+
+const softwareUpdateJournalSchema = z.object({
+  schemaVersion: z.literal("wafc-software-update-journal/1"),
+  transactionId: z.uuid(),
+  state: z.enum(["prepared", "old_renamed", "new_activated", "data_moved"]),
+  previousReleaseVersion: z.string().min(1).max(80),
+  newReleaseVersion: z.string().min(1).max(80),
+});
+
+type ReleaseManifest = z.infer<typeof releaseManifestSchema>;
+
+type ValidatedRelease = {
+  root: string;
+  manifestPath: string;
+  manifestSha256: string;
+  manifest: ReleaseManifest;
+  filePaths: string[];
+};
 
 const operatorRegistrySchema = z.object({
   schemaVersion: z.literal("wafc-operator-registry-entry/1"),
@@ -91,23 +156,27 @@ function sha256File(path: string): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function copyReleasePayload(
+function validateReleasePayload(
   releaseRoot: string,
-  destination: string,
-): { publishable: boolean } {
+  label: string,
+): ValidatedRelease {
   const source = assertRealDirectory(releaseRoot, "Field Collector 发行目录");
   const manifestSource = join(source, "release-manifest.json");
   const manifest = releaseManifestSchema.parse(readJsonLimited(manifestSource));
   const seen = new Set<string>();
-  mkdirSync(destination, { recursive: false });
-  const destinationRoot = assertRealDirectory(
-    destination,
-    "U 盘临时发行目录",
-  );
   for (const entry of manifest.files) {
     const relativePath = validateReleasePath(entry.path);
     if (relativePath === "release-manifest.json" || seen.has(relativePath)) {
       throw new Error("发行清单包含自身或重复路径");
+    }
+    const topLevel = relativePath.split("/")[0];
+    if (
+      topLevel &&
+      PRESERVED_PORTABLE_ENTRIES.includes(
+        topLevel as (typeof PRESERVED_PORTABLE_ENTRIES)[number],
+      )
+    ) {
+      throw new Error(`发行清单不得覆盖任务或证据路径：${relativePath}`);
     }
     seen.add(relativePath);
     const sourceFile = resolve(source, ...relativePath.split("/"));
@@ -115,8 +184,34 @@ function copyReleasePayload(
     assertRealFile(sourceFile, "发行文件");
     const metadata = lstatSync(sourceFile);
     if (metadata.size !== entry.bytes || sha256File(sourceFile) !== entry.sha256) {
-      throw new Error(`发行文件与清单不一致：${relativePath}`);
+      throw new Error(`${label}文件与清单不一致：${relativePath}`);
     }
+  }
+  if (!seen.has("field-collector.exe") || !seen.has("waeb-verify.exe")) {
+    throw new Error("发行清单缺少 Field Collector 或独立校验器");
+  }
+  if (!seen.has("extension/manifest.json")) {
+    throw new Error("发行清单缺少只读取证扩展");
+  }
+  return {
+    root: source,
+    manifestPath: assertRealFile(manifestSource, `${label}发行清单`),
+    manifestSha256: sha256File(manifestSource),
+    manifest,
+    filePaths: [...seen].sort(),
+  };
+}
+
+function copyReleasePayload(
+  releaseRoot: string,
+  destination: string,
+): ValidatedRelease {
+  const release = validateReleasePayload(releaseRoot, "Field Collector 发行");
+  mkdirSync(destination, { recursive: false });
+  const destinationRoot = assertRealDirectory(destination, "U 盘临时发行目录");
+  for (const entry of release.manifest.files) {
+    const relativePath = validateReleasePath(entry.path);
+    const sourceFile = resolve(release.root, ...relativePath.split("/"));
     const destinationFile = resolve(
       destinationRoot,
       ...relativePath.split("/"),
@@ -134,17 +229,192 @@ function copyReleasePayload(
     }
   }
   const destinationManifest = join(destinationRoot, "release-manifest.json");
-  copyFileSync(manifestSource, destinationManifest, fsConstants.COPYFILE_EXCL);
-  if (sha256File(destinationManifest) !== sha256File(manifestSource)) {
+  copyFileSync(
+    release.manifestPath,
+    destinationManifest,
+    fsConstants.COPYFILE_EXCL,
+  );
+  if (sha256File(destinationManifest) !== release.manifestSha256) {
     throw new Error("U 盘发行清单写入后哈希不一致");
   }
-  if (!seen.has("field-collector.exe") || !seen.has("waeb-verify.exe")) {
-    throw new Error("发行清单缺少 Field Collector 或独立校验器");
+  validateReleasePayload(destinationRoot, "U 盘暂存发行");
+  return release;
+}
+
+function collectManagedFiles(
+  root: string,
+  relativePath: string,
+  output: Set<string>,
+): void {
+  const target = resolve(root, ...relativePath.split("/"));
+  assertContained(root, target, "已部署软件路径");
+  const metadata = lstatSync(target);
+  if (metadata.isSymbolicLink()) {
+    throw new Error(`已部署软件包含符号链接或联接点：${relativePath}`);
   }
-  if (![...seen].some((path) => path === "extension/manifest.json")) {
-    throw new Error("发行清单缺少只读取证扩展");
+  if (metadata.isFile()) {
+    output.add(relativePath);
+    return;
   }
-  return { publishable: manifest.source.publishable };
+  if (!metadata.isDirectory()) {
+    throw new Error(`已部署软件包含不支持的文件类型：${relativePath}`);
+  }
+  for (const entry of readdirSync(target).sort()) {
+    collectManagedFiles(root, `${relativePath}/${entry}`, output);
+  }
+}
+
+function validateDeployedSoftwareLayout(
+  collectorRoot: string,
+  release: ValidatedRelease,
+): void {
+  const expected = new Set([...release.filePaths, "release-manifest.json"]);
+  const managedTopLevels = new Set(
+    [...expected].map((relativePath) => relativePath.split("/")[0]),
+  );
+  const actual = new Set<string>();
+  for (const entry of readdirSync(collectorRoot).sort()) {
+    if (
+      PRESERVED_PORTABLE_ENTRIES.includes(
+        entry as (typeof PRESERVED_PORTABLE_ENTRIES)[number],
+      )
+    ) {
+      continue;
+    }
+    if (!managedTopLevels.has(entry)) {
+      throw new Error(
+        `Field Collector 目录含有无法安全归类的文件：${entry}；为避免误删，软件更新已停止`,
+      );
+    }
+    collectManagedFiles(collectorRoot, entry, actual);
+  }
+  if (
+    actual.size !== expected.size ||
+    [...expected].some((relativePath) => !actual.has(relativePath))
+  ) {
+    throw new Error("已部署软件目录与其发行清单不一致，已拒绝覆盖更新");
+  }
+}
+
+function journalPaths(usbRoot: string, transactionId: string) {
+  const collector = join(usbRoot, COLLECTOR_DIRECTORY_NAME);
+  const staging = join(
+    usbRoot,
+    `.${COLLECTOR_DIRECTORY_NAME}.software-update.${transactionId}.partial`,
+  );
+  const backup = join(
+    usbRoot,
+    `.${COLLECTOR_DIRECTORY_NAME}.software-update.${transactionId}.backup`,
+  );
+  const journal = join(usbRoot, UPDATE_JOURNAL_NAME);
+  for (const path of [collector, staging, backup, journal]) {
+    assertContained(usbRoot, path, "U 盘软件更新路径");
+  }
+  return { collector, staging, backup, journal };
+}
+
+function writeUpdateJournal(
+  path: string,
+  document: z.infer<typeof softwareUpdateJournalSchema>,
+  create: boolean,
+): void {
+  const parsed = softwareUpdateJournalSchema.parse(document);
+  writeFileSync(path, `${JSON.stringify(parsed, null, 2)}\n`, {
+    encoding: "utf8",
+    flag: create ? "wx" : "w",
+    flush: true,
+  });
+}
+
+function recoverInterruptedSoftwareUpdate(usbRoot: string): void {
+  const journalPath = join(usbRoot, UPDATE_JOURNAL_NAME);
+  if (!existsSync(journalPath)) return;
+  const journal = softwareUpdateJournalSchema.parse(
+    readJsonLimited(journalPath, 64 * 1024),
+  );
+  const paths = journalPaths(usbRoot, journal.transactionId);
+  if (existsSync(paths.backup)) {
+    const backup = assertRealDirectory(paths.backup, "软件更新备份目录");
+    if (existsSync(paths.collector)) {
+      const collector = assertRealDirectory(
+        paths.collector,
+        "软件更新中的 Field Collector 目录",
+      );
+      for (const entry of PRESERVED_PORTABLE_ENTRIES) {
+        const currentEntry = join(collector, entry);
+        const backupEntry = join(backup, entry);
+        if (existsSync(currentEntry) && existsSync(backupEntry)) {
+          throw new Error(`软件更新恢复发现重复的保留路径：${entry}`);
+        }
+        if (existsSync(currentEntry)) renameSync(currentEntry, backupEntry);
+      }
+      rmSync(collector, { recursive: true, force: false });
+    }
+    renameSync(backup, paths.collector);
+  } else if (!existsSync(paths.collector)) {
+    throw new Error("检测到未完成的软件更新，但原 Field Collector 目录与备份均不存在");
+  }
+  if (existsSync(paths.staging)) {
+    const staging = assertRealDirectory(paths.staging, "软件更新暂存目录");
+    rmSync(staging, { recursive: true, force: false });
+  }
+  rmSync(paths.journal, { force: false });
+}
+
+function cleanupCommittedSoftwareBackups(usbRoot: string): void {
+  const backupPattern =
+    /^\.Field Collector\.software-update\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.backup$/u;
+  for (const entry of readdirSync(usbRoot)) {
+    if (!backupPattern.test(entry)) continue;
+    const backup = assertRealDirectory(
+      join(usbRoot, entry),
+      "已提交软件更新的旧版本备份",
+    );
+    if (
+      PRESERVED_PORTABLE_ENTRIES.some((preserved) =>
+        existsSync(join(backup, preserved)),
+      )
+    ) {
+      throw new Error(
+        "发现缺少事务日志且仍包含任务或证据数据的软件更新备份，已停止自动处理",
+      );
+    }
+    try {
+      rmSync(backup, { recursive: true, force: false });
+    } catch {
+      // A previously launched Collector may still hold the old executable.
+      // Leaving this software-only backup is safer than treating cleanup as an
+      // update failure; the next inspection retries after the process closes.
+    }
+  }
+}
+
+function rollbackSoftwareUpdate(
+  paths: ReturnType<typeof journalPaths>,
+): void {
+  if (existsSync(paths.backup)) {
+    const backup = assertRealDirectory(paths.backup, "软件更新备份目录");
+    if (existsSync(paths.collector)) {
+      const collector = assertRealDirectory(
+        paths.collector,
+        "更新失败后的 Field Collector 目录",
+      );
+      for (const entry of PRESERVED_PORTABLE_ENTRIES) {
+        const currentEntry = join(collector, entry);
+        const backupEntry = join(backup, entry);
+        if (existsSync(currentEntry) && !existsSync(backupEntry)) {
+          renameSync(currentEntry, backupEntry);
+        }
+      }
+      rmSync(collector, { recursive: true, force: false });
+    }
+    renameSync(backup, paths.collector);
+  }
+  if (existsSync(paths.staging)) {
+    const staging = assertRealDirectory(paths.staging, "软件更新暂存目录");
+    rmSync(staging, { recursive: true, force: false });
+  }
+  if (existsSync(paths.journal)) rmSync(paths.journal, { force: false });
 }
 
 export class ProvisioningService {
@@ -197,6 +467,194 @@ export class ProvisioningService {
         createdAtUtc: new Date().toISOString(),
       }),
     );
+  }
+
+  async inspectUsbSoftware(
+    input: InspectUsbSoftwareInput,
+  ): Promise<UsbSoftwareInspection> {
+    const parsed = inspectUsbSoftwareInputSchema.parse(input);
+    return (await this.#inspectUsbSoftware(parsed)).inspection;
+  }
+
+  async updateUsbSoftware(
+    input: UpdateUsbSoftwareInput,
+  ): Promise<UsbSoftwareUpdateResult> {
+    const parsed = updateUsbSoftwareInputSchema.parse(input);
+    const initial = await this.#inspectUsbSoftware(parsed);
+    const updatedAtUtc = new Date().toISOString();
+    if (!initial.inspection.updateNeeded) {
+      return usbSoftwareUpdateResultSchema.parse({
+        ...initial.inspection,
+        schemaVersion: "wafc-usb-software-update-result/1",
+        status: "already_current",
+        previousReleaseVersion: initial.currentRelease.manifest.releaseVersion,
+        newReleaseVersion: initial.availableRelease.manifest.releaseVersion,
+        installedFileCount: 0,
+        removedFileCount: 0,
+        preservedEntries: [...PRESERVED_RESULT_ENTRIES],
+        updateReceiptPath: null,
+        cleanupPending: false,
+        retainedBackupPath: null,
+        updatedAtUtc,
+      });
+    }
+
+    const transactionId = randomUUID();
+    const paths = journalPaths(initial.usbRoot, transactionId);
+    if (
+      existsSync(paths.staging) ||
+      existsSync(paths.backup) ||
+      existsSync(paths.journal)
+    ) {
+      throw new Error("U 盘中存在另一项未完成的软件更新");
+    }
+    const journal = {
+      schemaVersion: "wafc-software-update-journal/1" as const,
+      transactionId,
+      state: "prepared" as const,
+      previousReleaseVersion: initial.currentRelease.manifest.releaseVersion,
+      newReleaseVersion: initial.availableRelease.manifest.releaseVersion,
+    };
+    try {
+      writeUpdateJournal(paths.journal, journal, true);
+      copyReleasePayload(this.#collectorReleaseDirectory, paths.staging);
+    } catch (error) {
+      if (existsSync(paths.staging)) {
+        const staging = assertRealDirectory(paths.staging, "软件更新暂存目录");
+        rmSync(staging, { recursive: true, force: false });
+      }
+      if (existsSync(paths.journal)) rmSync(paths.journal, { force: false });
+      throw error;
+    }
+
+    let committed = false;
+    try {
+      renameSync(paths.collector, paths.backup);
+      writeUpdateJournal(
+        paths.journal,
+        { ...journal, state: "old_renamed" },
+        false,
+      );
+      renameSync(paths.staging, paths.collector);
+      writeUpdateJournal(
+        paths.journal,
+        { ...journal, state: "new_activated" },
+        false,
+      );
+      for (const entry of PRESERVED_PORTABLE_ENTRIES) {
+        const source = join(paths.backup, entry);
+        const destination = join(paths.collector, entry);
+        if (!existsSync(source) || existsSync(destination)) {
+          throw new Error(`无法安全转移保留数据：${entry}`);
+        }
+        renameSync(source, destination);
+      }
+      writeUpdateJournal(
+        paths.journal,
+        { ...journal, state: "data_moved" },
+        false,
+      );
+
+      const verifiedPortable = await this.#inspectPortableBundle(paths.collector);
+      if (
+        verifiedPortable.bundleId !== initial.portable.bundleId ||
+        verifiedPortable.portableManifestSha256 !==
+          initial.portable.portableManifestSha256 ||
+        verifiedPortable.operatorKeyFingerprintSha256 !==
+          initial.portable.operatorKeyFingerprintSha256
+      ) {
+        throw new Error("软件更新后任务、勘察员密钥或便携配置身份发生变化");
+      }
+      const installedRelease = validateReleasePayload(
+        paths.collector,
+        "更新后的 Field Collector",
+      );
+      validateDeployedSoftwareLayout(paths.collector, installedRelease);
+      if (
+        installedRelease.manifestSha256 !==
+        initial.availableRelease.manifestSha256
+      ) {
+        throw new Error("软件更新后发行清单与 Workstation 内置版本不一致");
+      }
+
+      rmSync(paths.journal, { force: false });
+      committed = true;
+    } catch (error) {
+      if (!committed) {
+        try {
+          rollbackSoftwareUpdate(paths);
+        } catch (rollbackError) {
+          throw new Error(
+            `${error instanceof Error ? error.message : "软件更新失败"}；自动回滚也失败：${
+              rollbackError instanceof Error ? rollbackError.message : "未知错误"
+            }。请保留 U 盘并交由技术人员恢复，切勿删除 .backup/.partial 目录。`,
+          );
+        }
+      }
+      throw error;
+    }
+
+    let cleanupPending = false;
+    try {
+      rmSync(paths.backup, { recursive: true, force: false });
+    } catch {
+      cleanupPending = true;
+    }
+
+    let updateReceiptPath: string | null = null;
+    try {
+      const diagnostics = assertRealDirectory(
+        join(paths.collector, "diagnostics"),
+        "U 盘诊断目录",
+      );
+      const updates = join(diagnostics, "software-updates");
+      if (!existsSync(updates)) mkdirSync(updates, { recursive: false });
+      const updatesRoot = assertRealDirectory(updates, "软件更新记录目录");
+      updateReceiptPath = join(updatesRoot, `software-update-${transactionId}.json`);
+      assertContained(updatesRoot, updateReceiptPath, "软件更新记录");
+      writeFileSync(
+        updateReceiptPath,
+        `${JSON.stringify(
+          {
+            schemaVersion: "wafc-software-update-receipt/1",
+            transactionId,
+            bundleId: initial.portable.bundleId,
+            previousReleaseVersion:
+              initial.currentRelease.manifest.releaseVersion,
+            newReleaseVersion: initial.availableRelease.manifest.releaseVersion,
+            previousManifestSha256: initial.currentRelease.manifestSha256,
+            newManifestSha256: initial.availableRelease.manifestSha256,
+            preservedEntries: PRESERVED_RESULT_ENTRIES,
+            updatedAtUtc,
+          },
+          null,
+          2,
+        )}\n`,
+        { encoding: "utf8", flag: "wx", flush: true },
+      );
+    } catch {
+      updateReceiptPath = null;
+    }
+
+    const removedFileCount = initial.currentRelease.filePaths.filter(
+      (path) => !initial.availableRelease.filePaths.includes(path),
+    ).length;
+    return usbSoftwareUpdateResultSchema.parse({
+      ...initial.inspection,
+      schemaVersion: "wafc-usb-software-update-result/1",
+      status: "updated",
+      currentReleaseVersion: initial.availableRelease.manifest.releaseVersion,
+      updateNeeded: false,
+      previousReleaseVersion: initial.currentRelease.manifest.releaseVersion,
+      newReleaseVersion: initial.availableRelease.manifest.releaseVersion,
+      installedFileCount: initial.availableRelease.filePaths.length + 1,
+      removedFileCount,
+      preservedEntries: [...PRESERVED_RESULT_ENTRIES],
+      updateReceiptPath,
+      cleanupPending,
+      retainedBackupPath: cleanupPending ? paths.backup : null,
+      updatedAtUtc,
+    });
   }
 
   async provisionUsb(input: ProvisionUsbInput): Promise<ProvisionUsbResult> {
@@ -270,6 +728,8 @@ export class ProvisioningService {
             issuedAtUtc: createdAtUtc,
             validFromUtc: parsed.assignment.validFromUtc,
             validUntilUtc: parsed.assignment.validUntilUtc,
+            acquisitionMode: parsed.assignment.acquisitionMode,
+            mediaPolicy: parsed.assignment.mediaPolicy,
             targetDescription: parsed.assignment.targetDescription,
           },
         ],
@@ -317,7 +777,67 @@ export class ProvisioningService {
     return {
       ...receipt,
       collectorDirectory: finalDirectory,
-      releasePublishable: release.publishable,
+      releasePublishable: release.manifest.source.publishable,
+    };
+  }
+
+  async #inspectPortableBundle(collectorRoot: string) {
+    return portableBundleInspectionSchema.parse(
+      await runJsonRpc<unknown>(this.#provisionerExecutable, {
+        method: "inspectPortableBundle",
+        collectorRoot,
+      }),
+    );
+  }
+
+  async #inspectUsbSoftware(input: InspectUsbSoftwareInput) {
+    const usbRoot = assertRealDirectory(input.usbRoot, "U 盘根目录");
+    recoverInterruptedSoftwareUpdate(usbRoot);
+    cleanupCommittedSoftwareBackups(usbRoot);
+    const collectorRoot = assertRealDirectory(
+      join(usbRoot, COLLECTOR_DIRECTORY_NAME),
+      "已部署的 Field Collector 目录",
+    );
+    const portable = await this.#inspectPortableBundle(collectorRoot);
+    const workstation = this.getWorkstationProfile();
+    if (!workstation) throw new Error("Workstation 配置签名身份尚未初始化");
+    if (
+      portable.workstationKeyFingerprintSha256 !== workstation.fingerprintSha256
+    ) {
+      throw new Error(
+        "该取证 U 盘不是由当前 Workstation 信任身份签发，已拒绝更新软件",
+      );
+    }
+    const currentRelease = validateReleasePayload(
+      collectorRoot,
+      "U 盘已部署软件",
+    );
+    validateDeployedSoftwareLayout(collectorRoot, currentRelease);
+    const availableRelease = validateReleasePayload(
+      this.#collectorReleaseDirectory,
+      "Workstation 内置 Field Collector",
+    );
+    const inspection = usbSoftwareInspectionSchema.parse({
+      schemaVersion: "wafc-usb-software-inspection/1",
+      collectorDirectory: collectorRoot,
+      bundleId: portable.bundleId,
+      operatorId: portable.operatorId,
+      operatorDisplayName: portable.operatorDisplayName,
+      assignmentIds: portable.assignmentIds,
+      currentReleaseVersion: currentRelease.manifest.releaseVersion,
+      availableReleaseVersion: availableRelease.manifest.releaseVersion,
+      currentReleasePublishable: currentRelease.manifest.source.publishable,
+      availableReleasePublishable: availableRelease.manifest.source.publishable,
+      updateNeeded:
+        currentRelease.manifestSha256 !== availableRelease.manifestSha256,
+    });
+    return {
+      usbRoot,
+      collectorRoot,
+      portable,
+      currentRelease,
+      availableRelease,
+      inspection,
     };
   }
 }

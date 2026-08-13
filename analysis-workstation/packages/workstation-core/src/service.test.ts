@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -42,7 +43,7 @@ const releaseDirectory = join(
   repositoryRoot,
   "field-collector",
   "out",
-  "whatsapp-field-collector-v0.1.0-windows-x86_64",
+  "whatsapp-field-collector-v0.2.6-windows-x86_64",
 );
 const fixtureBag = join(
   repositoryRoot,
@@ -258,8 +259,8 @@ describe("Analysis Workstation vertical slice", () => {
     await service.initializeWorkstation({
       workstationId: "lab-workstation-001",
       keyId: "workstation-key-001",
-      passphrase: "workstation-passphrase-2026",
-      passphraseConfirmation: "workstation-passphrase-2026",
+      passphrase: "Workstation!Passphrase2026",
+      passphraseConfirmation: "Workstation!Passphrase2026",
     });
     const validFrom = new Date(Date.now() + 60_000);
     const validUntil = new Date(Date.now() + 86_400_000);
@@ -273,16 +274,28 @@ describe("Analysis Workstation vertical slice", () => {
         keyId: "operator-key-001",
       },
       assignment: {
-        assignmentId: "assignment-usb-001",
+        assignmentId: "usb-001",
         authorizationReference: "AUTH-USB-001",
         sourceOrganization: "测试机构",
         validFromUtc: validFrom.toISOString(),
         validUntilUtc: validUntil.toISOString(),
-        targetDescription: "经授权的被动 T0 采集",
+        acquisitionMode: "comprehensive_readonly_v02",
+        mediaPolicy: {
+          mode: "network_best_effort",
+          maxAssetBytes: 2_147_483_648,
+          maxTotalBytes: 21_474_836_480,
+          cacheLookupTimeoutSeconds: 10,
+          noProgressTimeoutSeconds: 120,
+          attemptTimeoutSeconds: 600,
+          maxAssetDurationSeconds: 1_200,
+          maxAttempts: 2,
+          continueOnFailure: true,
+        },
+        targetDescription: "经授权的综合只读采集",
       },
-      workstationPassphrase: "workstation-passphrase-2026",
-      operatorPassphrase: "operator-passphrase-2026",
-      operatorPassphraseConfirmation: "operator-passphrase-2026",
+      workstationPassphrase: "Workstation!Passphrase2026",
+      operatorPassphrase: "Operator!Passphrase2026",
+      operatorPassphraseConfirmation: "Operator!Passphrase2026",
     });
     assert.equal(readFileSync(sentinel, "utf8"), "preserve-me");
     const collector = join(usbRoot, "Field Collector");
@@ -293,7 +306,102 @@ describe("Analysis Workstation vertical slice", () => {
       existsSync(join(collector, "assignments", "assignment-usb-001.json")),
     );
     assert.ok(existsSync(join(collector, "evidence", "sealed")));
-    assert.equal(catalog.listAssignments("case-usb-001").length, 1);
+    assert.equal(receipt.assignments[0]?.assignmentId, "assignment-usb-001");
+    assert.equal(
+      catalog.listAssignments("case-usb-001")[0]?.assignmentId,
+      "assignment-usb-001",
+    );
+
+    const operatorKey = join(collector, "config", "operator-key.enc");
+    const assignment = join(
+      collector,
+      "assignments",
+      "assignment-usb-001.json",
+    );
+    const keyBefore = readFileSync(operatorKey);
+    const assignmentBefore = readFileSync(assignment);
+    const evidenceSentinel = join(collector, "evidence", "sealed", "preserve.txt");
+    writeFileSync(evidenceSentinel, "sealed-evidence-stays", "utf8");
+
+    const deployedManifestPath = join(collector, "release-manifest.json");
+    const deployedManifest = JSON.parse(
+      readFileSync(deployedManifestPath, "utf8"),
+    ) as { releaseVersion: string };
+    deployedManifest.releaseVersion = "0.2.5-test-outdated";
+    writeFileSync(
+      deployedManifestPath,
+      `${JSON.stringify(deployedManifest, null, 2)}\n`,
+      "utf8",
+    );
+
+    const inspection = await service.inspectUsbSoftware({ usbRoot });
+    assert.equal(inspection.currentReleaseVersion, "0.2.5-test-outdated");
+    assert.equal(inspection.availableReleaseVersion, "0.2.6");
+    assert.equal(inspection.updateNeeded, true);
+    assert.equal(inspection.operatorId, "operator-a");
+    assert.deepEqual(inspection.assignmentIds, ["assignment-usb-001"]);
+
+    const update = await service.updateUsbSoftware({ usbRoot });
+    assert.equal(update.status, "updated");
+    assert.equal(update.previousReleaseVersion, "0.2.5-test-outdated");
+    assert.equal(update.newReleaseVersion, "0.2.6");
+    assert.equal(update.cleanupPending, false);
+    assert.deepEqual(readFileSync(operatorKey), keyBefore);
+    assert.deepEqual(readFileSync(assignment), assignmentBefore);
+    assert.equal(readFileSync(evidenceSentinel, "utf8"), "sealed-evidence-stays");
+    assert.deepEqual(
+      readFileSync(join(collector, "release-manifest.json")),
+      readFileSync(join(releaseDirectory, "release-manifest.json")),
+    );
+    assert.equal(
+      existsSync(join(usbRoot, ".Field Collector.software-update.json")),
+      false,
+    );
+    const current = await service.inspectUsbSoftware({ usbRoot });
+    assert.equal(current.updateNeeded, false);
+
+    const interruptedId = "22222222-2222-4222-8222-222222222222";
+    const interruptedBackup = join(
+      usbRoot,
+      `.Field Collector.software-update.${interruptedId}.backup`,
+    );
+    const interruptedStaging = join(
+      usbRoot,
+      `.Field Collector.software-update.${interruptedId}.partial`,
+    );
+    renameSync(collector, interruptedBackup);
+    cpSync(releaseDirectory, interruptedStaging, {
+      recursive: true,
+      errorOnExist: true,
+    });
+    writeFileSync(
+      join(usbRoot, ".Field Collector.software-update.json"),
+      `${JSON.stringify({
+        schemaVersion: "wafc-software-update-journal/1",
+        transactionId: interruptedId,
+        state: "old_renamed",
+        previousReleaseVersion: "0.2.6",
+        newReleaseVersion: "0.2.6",
+      })}\n`,
+      "utf8",
+    );
+    const recovered = await service.inspectUsbSoftware({ usbRoot });
+    assert.equal(recovered.updateNeeded, false);
+    assert.equal(existsSync(collector), true);
+    assert.equal(existsSync(interruptedBackup), false);
+    assert.equal(existsSync(interruptedStaging), false);
+    assert.equal(
+      existsSync(join(usbRoot, ".Field Collector.software-update.json")),
+      false,
+    );
+
+    const unexpected = join(collector, "unknown-field-tool.exe");
+    writeFileSync(unexpected, "do-not-delete-silently", "utf8");
+    await assert.rejects(
+      service.inspectUsbSoftware({ usbRoot }),
+      /无法安全归类/u,
+    );
+    assert.equal(readFileSync(unexpected, "utf8"), "do-not-delete-silently");
     catalog.close();
   });
 });

@@ -1,104 +1,10 @@
 "use strict";
 
-const PROTOCOL = "wafc-extension-relay/1";
-const SUBPROTOCOL = "wafc-extension-v1";
-const COLLECTOR_URL = "ws://127.0.0.1:17653/wafc-extension";
-const EXTENSION_VERSION = chrome.runtime.getManifest().version;
-const MAX_MESSAGE_BYTES = 1024 * 1024;
-const PAIRING_PATTERN = /^[2-9A-HJ-NP-Z]{10}$/;
-const REQUEST_ID_PATTERN = /^(0|[1-9][0-9]{0,19})$/;
-const SESSION_ID_PATTERN = /^wafc-session-[0-9a-f]{32}$/;
-const ALLOWED_EVENTS = new Set([
-  "Page.navigatedWithinDocument",
-  "Page.frameNavigated",
-  "Runtime.executionContextCreated",
-  "Runtime.executionContextsCleared",
-  "Inspector.detached",
-  "Target.targetDestroyed",
-  "Target.detachedFromTarget",
-  "Target.targetInfoChanged",
-]);
-const SIMPLE_COMMANDS = new Set([
-  "Runtime.enable",
-  "Page.enable",
-  "Page.getFrameTree",
-]);
-const ALLOWED_FUNCTIONS = new Set([
-  "function(command){ return this.dispatch(command); }",
-  "function(){ return this.next(); }",
-  "function(sequence){ return this.ack(sequence); }",
-  "function(){ return this.checkAccountBinding(); }",
-]);
-
 let session = null;
 let status = Object.freeze({phase: "idle", message: "等待连接"});
 
 function setStatus(phase, message) {
   status = Object.freeze({phase, message});
-}
-
-function exactKeys(value, expected) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const actual = Object.keys(value).sort();
-  const wanted = [...expected].sort();
-  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
-}
-
-function exactWhatsAppUrl(value) {
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === "https:"
-      && parsed.hostname === "web.whatsapp.com"
-      && parsed.port === ""
-      && parsed.username === ""
-      && parsed.password === "";
-  } catch {
-    return false;
-  }
-}
-
-function browserIdentity() {
-  const agent = navigator.userAgent;
-  const edge = /Edg\/([0-9.]+)/.exec(agent);
-  if (edge) {
-    return {browser_family: "edge", browser_version: `Edge/${edge[1]}`};
-  }
-  const chrome = /Chrome\/([0-9.]+)/.exec(agent);
-  if (chrome) {
-    return {browser_family: "chrome", browser_version: `Chrome/${chrome[1]}`};
-  }
-  throw new Error("unsupported_browser");
-}
-
-async function loadAdapter() {
-  const manifestResponse = await fetch(chrome.runtime.getURL("adapter/adapter-manifest.json"));
-  const adapterResponse = await fetch(chrome.runtime.getURL("adapter/collector.iife.js"));
-  if (!manifestResponse.ok || !adapterResponse.ok) {
-    throw new Error("adapter_unavailable");
-  }
-  const [adapterManifest, adapterText] = await Promise.all([
-    manifestResponse.json(),
-    adapterResponse.text(),
-  ]);
-  if (!exactKeys(adapterManifest, ["schemaVersion", "adapterId", "version", "sha256"])) {
-    throw new Error("adapter_manifest_invalid");
-  }
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(adapterText));
-  const sha256 = `sha256:${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-  if (adapterManifest.schemaVersion !== "wafc-adapter-manifest/1"
-      || adapterManifest.adapterId !== "wa-private-collections-v1"
-      || adapterManifest.version !== "1.0.0"
-      || adapterManifest.sha256 !== sha256) {
-    throw new Error("adapter_hash_mismatch");
-  }
-  return Object.freeze({
-    text: adapterText,
-    id: adapterManifest.adapterId,
-    version: adapterManifest.version,
-    sha256,
-  });
 }
 
 function wireSend(socket, value) {
@@ -134,70 +40,16 @@ async function currentTab() {
   return tabs[0];
 }
 
-function validateEvaluate(params, adapterText) {
-  if (!exactKeys(params, ["expression", "awaitPromise", "returnByValue", "userGesture"])) {
-    return false;
-  }
-  if (params.userGesture !== false || params.awaitPromise !== false) {
-    return false;
-  }
-  if (params.expression === adapterText) {
-    return params.returnByValue === false;
-  }
-  return params.expression === "window.location.origin" && params.returnByValue === true;
-}
-
-function validateCallFunction(params) {
-  if (!exactKeys(params, [
-    "functionDeclaration",
-    "arguments",
-    "awaitPromise",
-    "returnByValue",
-    "userGesture",
-    "objectId",
-  ])) {
-    return false;
-  }
-  return ALLOWED_FUNCTIONS.has(params.functionDeclaration)
-    && typeof params.objectId === "string"
-    && params.objectId.length > 0
-    && params.objectId.length <= 512
-    && Array.isArray(params.arguments)
-    && params.arguments.length <= 1
-    && JSON.stringify(params.arguments).length <= 1024
-    && params.awaitPromise === true
-    && params.returnByValue === true
-    && params.userGesture === false;
-}
-
-function validateRelease(params) {
-  return exactKeys(params, ["objectId"])
-    && typeof params.objectId === "string"
-    && params.objectId.length > 0
-    && params.objectId.length <= 512;
-}
-
-function validateCommand(method, params, adapterText) {
-  if (SIMPLE_COMMANDS.has(method)) {
-    return exactKeys(params, []);
-  }
-  if (method === "Runtime.evaluate") {
-    return validateEvaluate(params, adapterText);
-  }
-  if (method === "Runtime.callFunctionOn") {
-    return validateCallFunction(params);
-  }
-  if (method === "Runtime.releaseObject") {
-    return validateRelease(params);
-  }
-  return false;
-}
-
 async function detachSession(reason, notify = true) {
   const active = session;
   session = null;
   if (!active) {
     return;
+  }
+  if (typeof active.pairingReject === "function") {
+    active.pairingReject(new Error("pairing_failed"));
+    active.pairingResolve = null;
+    active.pairingReject = null;
   }
   try {
     await chrome.debugger.detach({tabId: active.tabId});
@@ -249,12 +101,30 @@ async function handleCollectorMessage(raw) {
     }
     session.sessionId = message.session_id;
     setStatus("paired", "已连接 Field Collector");
+    if (typeof session.pairingResolve === "function") {
+      session.pairingResolve();
+      session.pairingResolve = null;
+      session.pairingReject = null;
+    }
+    return;
+  }
+  if (message.kind === "heartbeat") {
+    if (!session || !exactKeys(message, ["kind", "protocol", "nonce"])
+        || !REQUEST_ID_PATTERN.test(message.nonce)) {
+      throw new Error("command_rejected");
+    }
+    wireSend(session.socket, {
+      kind: "heartbeat",
+      protocol: PROTOCOL,
+      nonce: message.nonce,
+    });
     return;
   }
   if (message.kind === "cdp_command") {
     if (!exactKeys(message, ["kind", "protocol", "request_id", "method", "params"])) {
       throw new Error("command_rejected");
     }
+    setStatus("collecting", "正在执行只读取证采集");
     try {
       const result = await executeCommand(message);
       wireSend(session.socket, {
@@ -287,6 +157,7 @@ async function handleCollectorMessage(raw) {
     }
     const active = session;
     try {
+      active.expectedDetach = true;
       await chrome.debugger.detach({tabId: active.tabId});
       wireSend(active.socket, {
         kind: "cdp_response",
@@ -347,12 +218,28 @@ async function beginPairing(pairingCode) {
       }, {once: true});
     });
     const browser = browserIdentity();
+    let pairingResolve;
+    let pairingReject;
+    const pairingConfirmed = new Promise((resolve, reject) => {
+      pairingResolve = resolve;
+      pairingReject = reject;
+    });
+    const pairingTimer = setTimeout(() => pairingReject(new Error("pairing_timeout")), 10000);
     session = {
       tabId: tab.id,
       initialUrl: tab.url,
       adapter,
       socket,
       sessionId: null,
+      pairingResolve: () => {
+        clearTimeout(pairingTimer);
+        pairingResolve();
+      },
+      pairingReject: (error) => {
+        clearTimeout(pairingTimer);
+        pairingReject(error);
+      },
+      expectedDetach: false,
     };
     socket.addEventListener("message", (event) => {
       void handleCollectorMessage(event.data).catch(async () => {
@@ -377,6 +264,7 @@ async function beginPairing(pairingCode) {
       browser_version: browser.browser_version,
       tab_url: tab.url,
     });
+    await pairingConfirmed;
     return {ok: true};
   } catch {
     if (Number.isInteger(tab?.id)) {
@@ -428,6 +316,9 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 
 chrome.debugger.onDetach.addListener((source, reason) => {
   if (!session || source.tabId !== session.tabId) {
+    return;
+  }
+  if (session.expectedDetach) {
     return;
   }
   const mapped = reason === "target_closed" ? "target_closed" : "canceled_by_user";

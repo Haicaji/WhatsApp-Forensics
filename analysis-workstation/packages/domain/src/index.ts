@@ -6,6 +6,17 @@ export const identifierSchema = z
   .max(120)
   .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/u);
 
+const canonicalAssignmentIdentifierSchema = z
+  .string()
+  .max(120)
+  .regex(/^assignment-[A-Za-z0-9][A-Za-z0-9_.-]*$/u);
+
+export const assignmentIdentifierInputSchema = identifierSchema
+  .transform((value) =>
+    value.startsWith("assignment-") ? value : `assignment-${value}`,
+  )
+  .pipe(canonicalAssignmentIdentifierSchema);
+
 export const lowercaseIdentifierSchema = z
   .string()
   .min(3)
@@ -15,6 +26,60 @@ export const lowercaseIdentifierSchema = z
 export const fingerprintSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/u);
 export const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/u);
 export const uuidSchema = z.uuid();
+
+const MIN_PASSPHRASE_CHARACTERS = 8;
+const MAX_PASSPHRASE_BYTES = 1024;
+
+function utf8Length(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function hasAsciiSymbol(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return (
+      (codePoint >= 0x21 && codePoint <= 0x2f) ||
+      (codePoint >= 0x3a && codePoint <= 0x40) ||
+      (codePoint >= 0x5b && codePoint <= 0x60) ||
+      (codePoint >= 0x7b && codePoint <= 0x7e)
+    );
+  });
+}
+
+export const unlockPassphraseSchema = z
+  .string()
+  .refine((value) => [...value].length >= MIN_PASSPHRASE_CHARACTERS, {
+    message: "口令至少需要 8 个字符",
+  })
+  .refine((value) => utf8Length(value) <= MAX_PASSPHRASE_BYTES, {
+    message: "口令不能超过 1024 个 UTF-8 字节",
+  });
+
+export const newKeyPassphraseSchema = unlockPassphraseSchema
+  .refine((value) => /[A-Z]/u.test(value), {
+    message: "新密钥口令必须包含大写字母",
+  })
+  .refine((value) => /[a-z]/u.test(value), {
+    message: "新密钥口令必须包含小写字母",
+  })
+  .refine((value) => /[0-9]/u.test(value), {
+    message: "新密钥口令必须包含数字",
+  })
+  .refine(hasAsciiSymbol, {
+    message: "新密钥口令必须包含符号",
+  });
+
+export const defaultNetworkBestEffortMediaPolicy = Object.freeze({
+  mode: "network_best_effort" as const,
+  maxAssetBytes: 2_147_483_648,
+  maxTotalBytes: 21_474_836_480,
+  cacheLookupTimeoutSeconds: 10,
+  noProgressTimeoutSeconds: 120,
+  attemptTimeoutSeconds: 600,
+  maxAssetDurationSeconds: 1_200,
+  maxAttempts: 2,
+  continueOnFailure: true,
+});
 
 export const cursorPageSchema = <T extends z.ZodType>(item: T) =>
   z.object({
@@ -170,8 +235,8 @@ export type WorkstationProfile = z.infer<typeof workstationProfileSchema>;
 export const initializeWorkstationInputSchema = z.object({
   workstationId: identifierSchema,
   keyId: identifierSchema,
-  passphrase: z.string().min(12).max(1024),
-  passphraseConfirmation: z.string().min(12).max(1024),
+  passphrase: newKeyPassphraseSchema,
+  passphraseConfirmation: newKeyPassphraseSchema,
 });
 
 export type InitializeWorkstationInput = z.infer<
@@ -188,16 +253,28 @@ export const provisionUsbInputSchema = z.object({
     keyId: identifierSchema,
   }),
   assignment: z.object({
-    assignmentId: identifierSchema,
+    assignmentId: assignmentIdentifierInputSchema,
     authorizationReference: z.string().trim().min(1).max(240),
     sourceOrganization: z.string().trim().min(1).max(240),
     validFromUtc: z.iso.datetime(),
     validUntilUtc: z.iso.datetime(),
+    acquisitionMode: z.enum(["passive_t0", "comprehensive_readonly_v02"]),
+    mediaPolicy: z.object({
+      mode: z.enum(["cached_only", "network_best_effort", "metadata_only"]),
+      maxAssetBytes: z.number().int().min(1).max(34_359_738_368),
+      maxTotalBytes: z.number().int().min(1).max(35_184_372_088_832),
+      cacheLookupTimeoutSeconds: z.number().int().min(1).max(300),
+      noProgressTimeoutSeconds: z.number().int().min(5).max(3_600),
+      attemptTimeoutSeconds: z.number().int().min(5).max(7_200),
+      maxAssetDurationSeconds: z.number().int().min(5).max(86_400),
+      maxAttempts: z.number().int().min(1).max(5),
+      continueOnFailure: z.boolean(),
+    }),
     targetDescription: z.string().trim().min(1).max(500),
   }),
-  workstationPassphrase: z.string().min(12).max(1024),
-  operatorPassphrase: z.string().min(12).max(1024),
-  operatorPassphraseConfirmation: z.string().min(12).max(1024),
+  workstationPassphrase: unlockPassphraseSchema,
+  operatorPassphrase: newKeyPassphraseSchema,
+  operatorPassphraseConfirmation: newKeyPassphraseSchema,
 });
 
 export type ProvisionUsbInput = z.infer<typeof provisionUsbInputSchema>;
@@ -222,6 +299,56 @@ export const provisioningReceiptSchema = z.object({
 
 export type ProvisioningReceipt = z.infer<typeof provisioningReceiptSchema>;
 
+export const inspectUsbSoftwareInputSchema = z.object({
+  usbRoot: z.string().min(1).max(1024),
+});
+
+export type InspectUsbSoftwareInput = z.infer<
+  typeof inspectUsbSoftwareInputSchema
+>;
+
+export const usbSoftwareInspectionSchema = z.object({
+  schemaVersion: z.literal("wafc-usb-software-inspection/1"),
+  collectorDirectory: z.string(),
+  bundleId: uuidSchema,
+  operatorId: lowercaseIdentifierSchema,
+  operatorDisplayName: z.string().min(1).max(160),
+  assignmentIds: z.array(identifierSchema).min(1).max(1000),
+  currentReleaseVersion: z.string().min(1).max(80),
+  availableReleaseVersion: z.string().min(1).max(80),
+  currentReleasePublishable: z.boolean(),
+  availableReleasePublishable: z.boolean(),
+  updateNeeded: z.boolean(),
+});
+
+export type UsbSoftwareInspection = z.infer<
+  typeof usbSoftwareInspectionSchema
+>;
+
+export const updateUsbSoftwareInputSchema = inspectUsbSoftwareInputSchema;
+
+export type UpdateUsbSoftwareInput = z.infer<
+  typeof updateUsbSoftwareInputSchema
+>;
+
+export const usbSoftwareUpdateResultSchema = usbSoftwareInspectionSchema.extend({
+  schemaVersion: z.literal("wafc-usb-software-update-result/1"),
+  status: z.enum(["updated", "already_current"]),
+  previousReleaseVersion: z.string().min(1).max(80),
+  newReleaseVersion: z.string().min(1).max(80),
+  installedFileCount: z.number().int().nonnegative(),
+  removedFileCount: z.number().int().nonnegative(),
+  preservedEntries: z.array(z.string()).min(7).max(16),
+  updateReceiptPath: z.string().nullable(),
+  cleanupPending: z.boolean(),
+  retainedBackupPath: z.string().nullable(),
+  updatedAtUtc: z.iso.datetime(),
+});
+
+export type UsbSoftwareUpdateResult = z.infer<
+  typeof usbSoftwareUpdateResultSchema
+>;
+
 export const importResultSchema = z.object({
   caseId: identifierSchema,
   evidenceId: uuidSchema,
@@ -245,4 +372,3 @@ export const usbIntakeResultSchema = z.object({
 });
 
 export type UsbIntakeResult = z.infer<typeof usbIntakeResultSchema>;
-

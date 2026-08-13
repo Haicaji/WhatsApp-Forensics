@@ -55,8 +55,17 @@ async function refreshStatus() {
     if (response.phase === "paired" || response.phase === "collecting") {
       renderStatus("已连接。请返回 Field Collector 继续。", "success");
       connectButton.disabled = true;
+    } else if (response.phase === "connecting") {
+      renderStatus("正在核对当前 WhatsApp 页面并建立只读连接……");
+      connectButton.disabled = true;
     } else if (response.phase === "failed") {
       renderStatus(response.message || "连接已停止，请按 Collector 向导重试。", "error");
+      connectButton.disabled = false;
+    } else if (response.phase === "completed") {
+      renderStatus(response.message || "本次只读连接已结束。", "success");
+      connectButton.disabled = false;
+    } else {
+      renderStatus("等待输入 Collector 显示的一次性配对码");
       connectButton.disabled = false;
     }
   } catch {
@@ -65,4 +74,6 @@ async function refreshStatus() {
 }
 
 void refreshStatus();
+const statusTimer = setInterval(() => void refreshStatus(), 500);
+window.addEventListener("unload", () => clearInterval(statusTimer), {once: true});
 input.focus();

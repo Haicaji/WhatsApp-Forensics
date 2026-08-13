@@ -68,7 +68,7 @@ function developmentPaths() {
       repositoryRoot,
       "field-collector",
       "out",
-      "whatsapp-field-collector-v0.1.0-windows-x86_64",
+      "whatsapp-field-collector-v0.2.6-windows-x86_64",
     ),
   };
 }

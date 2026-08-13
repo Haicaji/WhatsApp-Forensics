@@ -46,7 +46,13 @@ use url::{Host, Url};
 
 const MAX_HTTP_HEADERS: usize = 64 * 1024;
 const MAX_HTTP_BODY: usize = 16 * 1024 * 1024;
-const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+// A comprehensive read-only bridge frame may perform two independently bounded
+// 15-second media-cache/download attempts before returning a missing-media
+// result.  The host deadline must exceed that page-side bound; using the same
+// 15-second value caused a deterministic race in real Profiles.
+// Bridge/2 guarantees that pull/control calls remain short even while a media
+// job continues in the page. Long media policy timers live in collector-core.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const EVENT_BUFFER: usize = 256;
 
 /// Errors raised by browser discovery, endpoint probing, and CDP transport.
@@ -396,7 +402,9 @@ $json = ConvertTo-Json -InputObject @($rows) -Compress
     let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
     let powershell =
         Path::new(&system_root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
-    let output = Command::new(powershell)
+    let mut command = Command::new(powershell);
+    configure_hidden_windows_command(&mut command);
+    let output = command
         .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
         .output()
         .map_err(|_| BrowserCdpError::EndpointDiscovery)?;
@@ -586,7 +594,9 @@ fn process_is_running(executable_name: &str) -> bool {
     let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
     let tasklist = Path::new(&system_root).join(r"System32\tasklist.exe");
     let filter = format!("IMAGENAME eq {executable_name}");
-    let tasklist_observation = Command::new(tasklist)
+    let mut tasklist_command = Command::new(tasklist);
+    configure_hidden_windows_command(&mut tasklist_command);
+    let tasklist_observation = tasklist_command
         .args(["/FI", &filter, "/FO", "CSV", "/NH"])
         .output()
         .ok()
@@ -618,10 +628,20 @@ fn process_is_running(executable_name: &str) -> bool {
     let script = format!(
         "if (Get-Process -Name '{process_stem}' -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"
     );
-    Command::new(powershell)
+    let mut powershell_command = Command::new(powershell);
+    configure_hidden_windows_command(&mut powershell_command);
+    powershell_command
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .status()
         .is_ok_and(|status| status.success())
+}
+
+#[cfg(windows)]
+fn configure_hidden_windows_command(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
 }
 
 #[cfg(not(windows))]

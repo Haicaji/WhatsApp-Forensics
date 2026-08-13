@@ -17,7 +17,7 @@ import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 import { pipeline } from "node:stream/promises";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.8";
 const RELEASE_NAME = `wafc-analysis-workstation-v${VERSION}-windows-x64`;
 const analysisRoot = resolve(import.meta.dirname, "..");
 const repositoryRoot = resolve(analysisRoot, "..");
@@ -34,7 +34,7 @@ const electronExecutable = requireFromDesktop("electron");
 const electronRuntime = dirname(electronExecutable);
 const collectorRelease = resolve(
   repositoryRoot,
-  "field-collector/out/whatsapp-field-collector-v0.1.0-windows-x86_64",
+  "field-collector/out/whatsapp-field-collector-v0.2.6-windows-x86_64",
 );
 
 function fail(message) {

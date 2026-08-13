@@ -1,9 +1,14 @@
 "use strict";
 
+// Stable extension/Collector protocol surface. The extension build concatenates
+// this module ahead of the relay worker so the shipped MV3 package still has a
+// single service-worker entry point.
 const PROTOCOL = "wafc-extension-relay/1";
 const SUBPROTOCOL = "wafc-extension-v1";
 const COLLECTOR_URL = "ws://127.0.0.1:17653/wafc-extension";
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
+const CONTROLLER_PROTOCOL = "wafc-bridge/2";
+const CONTROLLER_VERSION = "0.2.5";
 const MAX_MESSAGE_BYTES = 1024 * 1024;
 const PAIRING_PATTERN = /^[2-9A-HJ-NP-Z]{10}$/;
 const REQUEST_ID_PATTERN = /^(0|[1-9][0-9]{0,19})$/;
@@ -23,19 +28,18 @@ const SIMPLE_COMMANDS = new Set([
   "Page.enable",
   "Page.getFrameTree",
 ]);
+const DISPATCH_FUNCTION = "function(request){ return this.dispatch(request); }";
+const NEXT_FUNCTION = "function(){ return this.next(); }";
+const ACK_FUNCTION = "function(sequence){ return this.ack(sequence); }";
+const BINDING_FUNCTION = "function(){ return this.checkAccountBinding(); }";
+const MEDIA_CONTROL_FUNCTION = "function(command){ return this.controlMedia(command); }";
 const ALLOWED_FUNCTIONS = new Set([
-  "function(command){ return this.dispatch(command); }",
-  "function(){ return this.next(); }",
-  "function(sequence){ return this.ack(sequence); }",
-  "function(){ return this.checkAccountBinding(); }",
+  DISPATCH_FUNCTION,
+  NEXT_FUNCTION,
+  ACK_FUNCTION,
+  BINDING_FUNCTION,
+  MEDIA_CONTROL_FUNCTION,
 ]);
-
-let session = null;
-let status = Object.freeze({phase: "idle", message: "等待连接"});
-
-function setStatus(phase, message) {
-  status = Object.freeze({phase, message});
-}
 
 function exactKeys(value, expected) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -72,6 +76,10 @@ function browserIdentity() {
   throw new Error("unsupported_browser");
 }
 
+"use strict";
+
+// Adapter integrity and version gate. Frequently changing WhatsApp readers stay
+// in adapter/collector.iife.js; the extension shell only verifies and injects it.
 async function loadAdapter() {
   const manifestResponse = await fetch(chrome.runtime.getURL("adapter/adapter-manifest.json"));
   const adapterResponse = await fetch(chrome.runtime.getURL("adapter/collector.iife.js"));
@@ -82,14 +90,15 @@ async function loadAdapter() {
     manifestResponse.json(),
     adapterResponse.text(),
   ]);
-  if (!exactKeys(adapterManifest, ["schemaVersion", "adapterId", "version", "sha256"])) {
+  if (!exactKeys(adapterManifest, ["schemaVersion", "adapterId", "version", "bridgeProtocol", "sha256"])) {
     throw new Error("adapter_manifest_invalid");
   }
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(adapterText));
   const sha256 = `sha256:${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
   if (adapterManifest.schemaVersion !== "wafc-adapter-manifest/1"
-      || adapterManifest.adapterId !== "wa-private-collections-v1"
-      || adapterManifest.version !== "1.0.0"
+      || adapterManifest.adapterId !== "wa-private-collections-v2"
+      || adapterManifest.version !== "2.5.3"
+      || adapterManifest.bridgeProtocol !== CONTROLLER_PROTOCOL
       || adapterManifest.sha256 !== sha256) {
     throw new Error("adapter_hash_mismatch");
   }
@@ -99,6 +108,162 @@ async function loadAdapter() {
     version: adapterManifest.version,
     sha256,
   });
+}
+
+"use strict";
+
+// Fail-closed CDP command policy. The relay worker cannot execute an arbitrary
+// method, expression or function supplied over the local channel.
+function validateEvaluate(params, adapterText) {
+  if (!exactKeys(params, ["expression", "awaitPromise", "returnByValue", "userGesture"])) {
+    return false;
+  }
+  if (params.userGesture !== false || params.awaitPromise !== false) {
+    return false;
+  }
+  if (params.expression === adapterText) {
+    return params.returnByValue === false;
+  }
+  return params.expression === "window.location.origin" && params.returnByValue === true;
+}
+
+const MEDIA_TOTAL_KEYS = Object.freeze([
+  "requested", "available", "missing", "expired", "decryptError",
+  "downloadTimeout", "noProgressTimeout", "tooLarge", "diskSpaceInsufficient",
+  "hashMismatch", "transportInterrupted", "canceled", "unavailable", "notAttempted"
+]);
+
+function validateResume(value) {
+  if (!exactKeys(value, [
+    "challengeHex", "existing", "mediaPlanSha256", "mediaStartIndex", "mediaTotals"
+  ]) || typeof value.existing !== "boolean"
+      || typeof value.challengeHex !== "string" || !/^[0-9a-f]{64}$/.test(value.challengeHex)
+      || !Number.isSafeInteger(value.mediaStartIndex) || value.mediaStartIndex < 0
+      || !exactKeys(value.mediaTotals, MEDIA_TOTAL_KEYS)
+      || !MEDIA_TOTAL_KEYS.every((key) => Number.isSafeInteger(value.mediaTotals[key])
+        && value.mediaTotals[key] >= 0)) {
+    return false;
+  }
+  const terminal = MEDIA_TOTAL_KEYS
+    .filter((key) => key !== "requested")
+    .reduce((sum, key) => sum + value.mediaTotals[key], 0);
+  return value.existing
+    ? typeof value.mediaPlanSha256 === "string" && /^[0-9a-f]{64}$/.test(value.mediaPlanSha256)
+      && terminal === value.mediaStartIndex && value.mediaTotals.requested >= value.mediaStartIndex
+    : value.mediaPlanSha256 === null && value.mediaStartIndex === 0
+      && MEDIA_TOTAL_KEYS.every((key) => value.mediaTotals[key] === 0);
+}
+
+function validateCallFunction(params) {
+  if (!exactKeys(params, [
+    "functionDeclaration", "arguments", "awaitPromise", "returnByValue", "userGesture", "objectId",
+  ])) {
+    return false;
+  }
+  const callShapeValid = ALLOWED_FUNCTIONS.has(params.functionDeclaration)
+    && typeof params.objectId === "string"
+    && params.objectId.length > 0
+    && params.objectId.length <= 512
+    && Array.isArray(params.arguments)
+    && params.arguments.length <= 1
+    && JSON.stringify(params.arguments).length <= 1024
+    && params.awaitPromise === true
+    && params.returnByValue === true
+    && params.userGesture === false;
+  if (!callShapeValid) return false;
+
+  if (params.functionDeclaration === DISPATCH_FUNCTION) {
+    if (params.arguments.length !== 1 || !exactKeys(params.arguments[0], ["value"])) return false;
+    const request = params.arguments[0].value;
+    if (!request || typeof request !== "object" || Array.isArray(request)) return false;
+    if (request.protocol !== CONTROLLER_PROTOCOL
+        || request.controllerVersion !== CONTROLLER_VERSION) return false;
+    if (request.command === "probe"
+        && exactKeys(request, ["command", "controllerVersion", "protocol"])) return true;
+    if (request.command === "start_t0"
+        && exactKeys(request, ["command", "controllerVersion", "protocol", "resume"])
+        && validateResume(request.resume)) return true;
+    if (request.command !== "start_comprehensive"
+        || !exactKeys(request, ["command", "controllerVersion", "mediaPolicy", "protocol", "resume"])
+        || !validateResume(request.resume)) return false;
+    const policy = request.mediaPolicy;
+    return exactKeys(policy, [
+      "mode", "maxAssetBytes", "maxTotalBytes", "cacheLookupTimeoutSeconds",
+      "noProgressTimeoutSeconds", "attemptTimeoutSeconds", "maxAssetDurationSeconds",
+      "maxAttempts", "continueOnFailure"
+    ]) && ["cached_only", "network_best_effort", "metadata_only"].includes(policy.mode)
+      && [
+        policy.maxAssetBytes, policy.maxTotalBytes, policy.cacheLookupTimeoutSeconds,
+        policy.noProgressTimeoutSeconds, policy.attemptTimeoutSeconds,
+        policy.maxAssetDurationSeconds, policy.maxAttempts
+      ].every((value) => Number.isSafeInteger(value) && value > 0)
+      && policy.maxAssetBytes <= 34359738368
+      && policy.maxTotalBytes >= policy.maxAssetBytes
+      && policy.maxTotalBytes <= 35184372088832
+      && policy.cacheLookupTimeoutSeconds <= 300
+      && policy.noProgressTimeoutSeconds >= 5 && policy.noProgressTimeoutSeconds <= 3600
+      && policy.attemptTimeoutSeconds >= 5 && policy.attemptTimeoutSeconds <= 7200
+      && policy.maxAssetDurationSeconds >= policy.attemptTimeoutSeconds
+      && policy.maxAssetDurationSeconds <= 86400
+      && policy.maxAttempts <= 5
+      && typeof policy.continueOnFailure === "boolean";
+  }
+  if (params.functionDeclaration === ACK_FUNCTION) {
+    return params.arguments.length === 1
+      && exactKeys(params.arguments[0], ["value"])
+      && typeof params.arguments[0].value === "string"
+      && REQUEST_ID_PATTERN.test(params.arguments[0].value);
+  }
+  if (params.functionDeclaration === MEDIA_CONTROL_FUNCTION) {
+    if (params.arguments.length !== 1 || !exactKeys(params.arguments[0], ["value"])) return false;
+    const command = params.arguments[0].value;
+    if (!command || typeof command !== "object" || Array.isArray(command)) return false;
+    if (["begin_download", "retry_current"].includes(command.action)) {
+      return exactKeys(command, ["action"]);
+    }
+    if (command.action === "terminate_current") {
+      return exactKeys(command, ["action", "reason"]) && [
+        "media_download_timeout", "media_no_progress_timeout", "media_too_large",
+        "media_disk_space_insufficient", "media_hash_mismatch",
+        "media_transport_interrupted", "media_canceled", "media_not_attempted",
+        "media_total_limit_reached", "media_cache_miss_network_disallowed",
+        "media_policy_stop_after_failure"
+      ].includes(command.reason);
+    }
+    return command.action === "stop_media_queue"
+      && exactKeys(command, ["action", "reason"])
+      && [
+        "media_total_limit_reached", "media_disk_space_insufficient", "media_canceled",
+        "media_policy_stop_after_failure"
+      ].includes(command.reason);
+  }
+  return (params.functionDeclaration === NEXT_FUNCTION
+      || params.functionDeclaration === BINDING_FUNCTION)
+    && params.arguments.length === 0;
+}
+
+function validateRelease(params) {
+  return exactKeys(params, ["objectId"])
+    && typeof params.objectId === "string"
+    && params.objectId.length > 0
+    && params.objectId.length <= 512;
+}
+
+function validateCommand(method, params, adapterText) {
+  if (SIMPLE_COMMANDS.has(method)) return exactKeys(params, []);
+  if (method === "Runtime.evaluate") return validateEvaluate(params, adapterText);
+  if (method === "Runtime.callFunctionOn") return validateCallFunction(params);
+  if (method === "Runtime.releaseObject") return validateRelease(params);
+  return false;
+}
+
+"use strict";
+
+let session = null;
+let status = Object.freeze({phase: "idle", message: "等待连接"});
+
+function setStatus(phase, message) {
+  status = Object.freeze({phase, message});
 }
 
 function wireSend(socket, value) {
@@ -134,70 +299,16 @@ async function currentTab() {
   return tabs[0];
 }
 
-function validateEvaluate(params, adapterText) {
-  if (!exactKeys(params, ["expression", "awaitPromise", "returnByValue", "userGesture"])) {
-    return false;
-  }
-  if (params.userGesture !== false || params.awaitPromise !== false) {
-    return false;
-  }
-  if (params.expression === adapterText) {
-    return params.returnByValue === false;
-  }
-  return params.expression === "window.location.origin" && params.returnByValue === true;
-}
-
-function validateCallFunction(params) {
-  if (!exactKeys(params, [
-    "functionDeclaration",
-    "arguments",
-    "awaitPromise",
-    "returnByValue",
-    "userGesture",
-    "objectId",
-  ])) {
-    return false;
-  }
-  return ALLOWED_FUNCTIONS.has(params.functionDeclaration)
-    && typeof params.objectId === "string"
-    && params.objectId.length > 0
-    && params.objectId.length <= 512
-    && Array.isArray(params.arguments)
-    && params.arguments.length <= 1
-    && JSON.stringify(params.arguments).length <= 1024
-    && params.awaitPromise === true
-    && params.returnByValue === true
-    && params.userGesture === false;
-}
-
-function validateRelease(params) {
-  return exactKeys(params, ["objectId"])
-    && typeof params.objectId === "string"
-    && params.objectId.length > 0
-    && params.objectId.length <= 512;
-}
-
-function validateCommand(method, params, adapterText) {
-  if (SIMPLE_COMMANDS.has(method)) {
-    return exactKeys(params, []);
-  }
-  if (method === "Runtime.evaluate") {
-    return validateEvaluate(params, adapterText);
-  }
-  if (method === "Runtime.callFunctionOn") {
-    return validateCallFunction(params);
-  }
-  if (method === "Runtime.releaseObject") {
-    return validateRelease(params);
-  }
-  return false;
-}
-
 async function detachSession(reason, notify = true) {
   const active = session;
   session = null;
   if (!active) {
     return;
+  }
+  if (typeof active.pairingReject === "function") {
+    active.pairingReject(new Error("pairing_failed"));
+    active.pairingResolve = null;
+    active.pairingReject = null;
   }
   try {
     await chrome.debugger.detach({tabId: active.tabId});
@@ -249,12 +360,30 @@ async function handleCollectorMessage(raw) {
     }
     session.sessionId = message.session_id;
     setStatus("paired", "已连接 Field Collector");
+    if (typeof session.pairingResolve === "function") {
+      session.pairingResolve();
+      session.pairingResolve = null;
+      session.pairingReject = null;
+    }
+    return;
+  }
+  if (message.kind === "heartbeat") {
+    if (!session || !exactKeys(message, ["kind", "protocol", "nonce"])
+        || !REQUEST_ID_PATTERN.test(message.nonce)) {
+      throw new Error("command_rejected");
+    }
+    wireSend(session.socket, {
+      kind: "heartbeat",
+      protocol: PROTOCOL,
+      nonce: message.nonce,
+    });
     return;
   }
   if (message.kind === "cdp_command") {
     if (!exactKeys(message, ["kind", "protocol", "request_id", "method", "params"])) {
       throw new Error("command_rejected");
     }
+    setStatus("collecting", "正在执行只读取证采集");
     try {
       const result = await executeCommand(message);
       wireSend(session.socket, {
@@ -287,6 +416,7 @@ async function handleCollectorMessage(raw) {
     }
     const active = session;
     try {
+      active.expectedDetach = true;
       await chrome.debugger.detach({tabId: active.tabId});
       wireSend(active.socket, {
         kind: "cdp_response",
@@ -347,12 +477,28 @@ async function beginPairing(pairingCode) {
       }, {once: true});
     });
     const browser = browserIdentity();
+    let pairingResolve;
+    let pairingReject;
+    const pairingConfirmed = new Promise((resolve, reject) => {
+      pairingResolve = resolve;
+      pairingReject = reject;
+    });
+    const pairingTimer = setTimeout(() => pairingReject(new Error("pairing_timeout")), 10000);
     session = {
       tabId: tab.id,
       initialUrl: tab.url,
       adapter,
       socket,
       sessionId: null,
+      pairingResolve: () => {
+        clearTimeout(pairingTimer);
+        pairingResolve();
+      },
+      pairingReject: (error) => {
+        clearTimeout(pairingTimer);
+        pairingReject(error);
+      },
+      expectedDetach: false,
     };
     socket.addEventListener("message", (event) => {
       void handleCollectorMessage(event.data).catch(async () => {
@@ -377,6 +523,7 @@ async function beginPairing(pairingCode) {
       browser_version: browser.browser_version,
       tab_url: tab.url,
     });
+    await pairingConfirmed;
     return {ok: true};
   } catch {
     if (Number.isInteger(tab?.id)) {
@@ -428,6 +575,9 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 
 chrome.debugger.onDetach.addListener((source, reason) => {
   if (!session || source.tabId !== session.tabId) {
+    return;
+  }
+  if (session.expectedDetach) {
     return;
   }
   const mapped = reason === "target_closed" ? "target_closed" : "canceled_by_user";

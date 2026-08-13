@@ -18,5 +18,11 @@ declared `MIT OR Apache-2.0`, this distribution selects the `Apache-2.0`
 alternative; packages declared only `Apache-2.0` use the same unmodified
 standard text. No package with another expression can use that file.
 
+The exact AccessKit versions listed in the script use that Apache-2.0 text as
+their primary redistribution license. AccessKit also states that significant
+portions are derived from Chromium, so its unmodified `LICENSE.chromium` notice
+is included as a supplemental notice. Both files are pinned independently by
+SHA-256; a future AccessKit version must be audited and listed separately.
+
 An override supplies a missing notice for redistribution. It does not change a
 package's declared license, bypass the SPDX allowlist, or permit future versions.

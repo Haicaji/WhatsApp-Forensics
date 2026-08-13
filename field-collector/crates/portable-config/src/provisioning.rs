@@ -18,11 +18,12 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    ASSIGNMENT_DOMAIN, ASSIGNMENT_SCHEMA, ASSIGNMENTS_DIR, AssignmentDocument, AssignmentPayload,
-    BundleManifest, DIAGNOSTICS_DIR, HANDOFF_DIR, KEY_PATH, LAYOUT, MANIFEST_DOMAIN, MANIFEST_PATH,
-    MANIFEST_SCHEMA, ManifestFile, ManifestPayload, OperatorProfile, PROFILE_PATH, PROFILE_SCHEMA,
-    PortableConfigError, PortableRootDocument, ROOT_MARKER, ROOT_SCHEMA, SEALED_DIR, STAGING_DIR,
-    SignatureDocument, TRUST_PATH, TRUST_SCHEMA, WorkstationTrust, fixed_paths, jcs, sha256_hex,
+    ASSIGNMENT_DOMAIN, ASSIGNMENT_SCHEMA, ASSIGNMENTS_DIR, AcquisitionMode, AssignmentDocument,
+    AssignmentPayload, BundleManifest, DIAGNOSTICS_DIR, HANDOFF_DIR, KEY_PATH, LAYOUT,
+    MANIFEST_DOMAIN, MANIFEST_PATH, MANIFEST_SCHEMA, ManifestFile, ManifestPayload, MediaPolicy,
+    OperatorProfile, PROFILE_PATH, PROFILE_SCHEMA, PortableConfigError, PortableRootDocument,
+    ROOT_MARKER, ROOT_SCHEMA, SEALED_DIR, STAGING_DIR, SignatureDocument, TRUST_PATH, TRUST_SCHEMA,
+    WorkstationTrust, fixed_paths, jcs, sha256_hex,
 };
 
 /// One signed task to place in a newly provisioned bundle.
@@ -40,6 +41,10 @@ pub struct AssignmentTemplate {
     pub valid_from_utc: DateTime<Utc>,
     /// Exclusive validity end.
     pub valid_until_utc: DateTime<Utc>,
+    /// Signed acquisition policy selected by Analysis Workstation.
+    pub acquisition_mode: AcquisitionMode,
+    /// Signed media scheduling and limit policy.
+    pub media_policy: MediaPolicy,
     /// Human-readable target description.
     pub target_description: String,
 }
@@ -184,7 +189,8 @@ pub fn provision(request: &ProvisionRequest<'_>) -> Result<ProvisionedBundle, Po
             issued_at_utc: utc(assignment.issued_at_utc),
             valid_from_utc: utc(assignment.valid_from_utc),
             valid_until_utc: utc(assignment.valid_until_utc),
-            acquisition_mode: "passive_t0".to_owned(),
+            acquisition_mode: assignment.acquisition_mode,
+            media_policy: assignment.media_policy,
             target_description: assignment.target_description.clone(),
         };
         let signature = sign_payload(

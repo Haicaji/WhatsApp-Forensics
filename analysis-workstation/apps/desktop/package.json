@@ -1,7 +1,7 @@
 {
   "name": "@wafc/desktop",
   "productName": "WAFC Analysis Workstation",
-  "version": "0.1.0",
+  "version": "0.1.8",
   "private": true,
   "description": "WAFC Analysis Workstation Electron desktop application",
   "main": "dist/electron/main/index.cjs",

@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
@@ -106,6 +106,9 @@ pub struct LogChainState {
     pub event_count: u64,
     /// Terminal event hash, absent before the first event.
     pub terminal_event_hash: Option<String>,
+    /// Last accepted monotonic offset, used to continue the same audit clock
+    /// after a process-safe checkpoint resume.
+    pub last_monotonic_offset_ns: u64,
 }
 
 /// Result of committing one streamed media object into CAS.
@@ -253,6 +256,7 @@ impl WaebWriter {
             log_state: LogChainState {
                 event_count: 0,
                 terminal_event_hash: None,
+                last_monotonic_offset_ns: 0,
             },
             acquisition_written: false,
             inventory_written: false,
@@ -261,6 +265,49 @@ impl WaebWriter {
         };
         writer.initialize_payload()?;
         Ok(writer)
+    }
+
+    /// Reopens an existing, manifest-verified streaming staging directory.
+    ///
+    /// The caller must first authenticate an external checkpoint and restore
+    /// the staging tree to that checkpoint's exact file manifest. This method
+    /// independently revalidates the fixed wrapper layout, canonical
+    /// normalized NDJSON, source binding, append-only log chain, and absence of
+    /// finalized metadata before allowing any further append.
+    pub fn reopen_with_roots(
+        staging_base: impl AsRef<Path>,
+        final_base: impl AsRef<Path>,
+        evidence_id: Uuid,
+        source_id: Uuid,
+    ) -> Result<Self, WaebError> {
+        let staging_base = canonical_real_directory(staging_base.as_ref(), "stagingBase")?;
+        let final_base = canonical_real_directory(final_base.as_ref(), "finalBase")?;
+        let leaf = format!("waeb-{evidence_id}");
+        let staging_root = staging_base.join(format!("{leaf}.partial"));
+        let staging_dir = staging_root.join(&leaf);
+        let final_dir = final_base.join(&leaf);
+        if path_is_present(&final_dir)? {
+            return Err(WaebError::FinalExists(final_dir));
+        }
+        validate_reopen_layout(&staging_base, &staging_root, &staging_dir)?;
+        validate_reopen_payload_files(&staging_dir)?;
+        let dataset_stats = restore_dataset_stats(&staging_dir, source_id)?;
+        let log_state = restore_log_state(&staging_dir.join(LOG_PATH))?;
+        Ok(Self {
+            staging_base,
+            final_base,
+            staging_root,
+            staging_dir,
+            final_dir,
+            evidence_id,
+            source_id: Some(source_id),
+            dataset_stats,
+            log_state,
+            acquisition_written: false,
+            inventory_written: false,
+            completeness_written: false,
+            capabilities_written: false,
+        })
     }
 
     /// Returns the current staging directory.
@@ -342,7 +389,7 @@ impl WaebWriter {
     }
 
     /// Starts a media stream in a private incoming directory.
-    pub fn start_media(&mut self) -> Result<MediaStream<'_>, WaebError> {
+    pub fn start_media(&mut self) -> Result<MediaStream, WaebError> {
         self.ensure_payload_open()?;
         let incoming = self.staging_dir.join(".incoming");
         create_dir_checked(&incoming)?;
@@ -353,7 +400,7 @@ impl WaebWriter {
             .open(&temp_path)
             .at(&temp_path)?;
         Ok(MediaStream {
-            writer: self,
+            staging_dir: self.staging_dir.clone(),
             file: Some(file),
             temp_path,
             sha256: Sha256::new(),
@@ -374,6 +421,14 @@ impl WaebWriter {
         self.ensure_payload_open()?;
         validate_timestamp(wall_clock_utc, "wallClockUtc")?;
         validate_summary(summary)?;
+        if self.log_state.event_count > 0
+            && monotonic_offset_ns < self.log_state.last_monotonic_offset_ns
+        {
+            return Err(invalid(
+                "monotonicOffsetNs",
+                "cannot regress while appending acquisition log",
+            ));
+        }
         let sequence = self.log_state.event_count + 1;
         let previous = self.log_state.terminal_event_hash.clone();
         let without_hash = json!({
@@ -412,6 +467,7 @@ impl WaebWriter {
         )?;
         self.log_state.event_count = sequence;
         self.log_state.terminal_event_hash = Some(event_hash.clone());
+        self.log_state.last_monotonic_offset_ns = monotonic_offset_ns;
         Ok(event_hash)
     }
 
@@ -822,8 +878,8 @@ impl SealedBag {
 }
 
 /// In-progress media bytes whose digest is computed while streaming.
-pub struct MediaStream<'a> {
-    writer: &'a mut WaebWriter,
+pub struct MediaStream {
+    staging_dir: PathBuf,
     file: Option<File>,
     temp_path: PathBuf,
     sha256: Sha256,
@@ -831,7 +887,7 @@ pub struct MediaStream<'a> {
     byte_length: u64,
 }
 
-impl MediaStream<'_> {
+impl MediaStream {
     /// Writes a media chunk without buffering the complete asset in memory.
     pub fn write_chunk(&mut self, bytes: &[u8]) -> Result<(), WaebError> {
         let file = self.file.as_mut().ok_or(WaebError::MediaAlreadyCommitted)?;
@@ -856,7 +912,7 @@ impl MediaStream<'_> {
         let sha256 = hex::encode(self.sha256.clone().finalize());
         let sha512 = hex::encode(self.sha512.clone().finalize());
         let relative_path = format!("data/media/sha256/{}/{}", &sha256[..2], sha256);
-        let target = self.writer.staging_dir.join(&relative_path);
+        let target = self.staging_dir.join(&relative_path);
         create_parent_checked(&target)?;
         let deduplicated = if target.exists() {
             reject_symlink(&target)?;
@@ -870,7 +926,7 @@ impl MediaStream<'_> {
             fs::rename(&self.temp_path, &target).at(&self.temp_path)?;
             false
         };
-        let _ = fs::remove_dir(self.writer.staging_dir.join(".incoming"));
+        let _ = fs::remove_dir(self.staging_dir.join(".incoming"));
         Ok(MediaAsset {
             relative_path,
             sha256,
@@ -881,7 +937,7 @@ impl MediaStream<'_> {
     }
 }
 
-impl Drop for MediaStream<'_> {
+impl Drop for MediaStream {
     fn drop(&mut self) {
         if self.file.take().is_some() {
             let _ = fs::remove_file(&self.temp_path);
@@ -995,6 +1051,245 @@ fn path_is_present(path: &Path) -> Result<bool, WaebError> {
             source,
         }),
     }
+}
+
+fn validate_reopen_layout(
+    staging_base: &Path,
+    staging_root: &Path,
+    staging_dir: &Path,
+) -> Result<(), WaebError> {
+    for path in [staging_root, staging_dir] {
+        reject_symlink(path)?;
+        if !fs::metadata(path).at(path)?.is_dir() {
+            return Err(invalid("resume", "staging layout is not a directory"));
+        }
+    }
+    if staging_root.parent() != Some(staging_base) || staging_dir.parent() != Some(staging_root) {
+        return Err(invalid("resume", "staging layout escaped its fixed root"));
+    }
+    let entries = fs::read_dir(staging_root)
+        .at(staging_root)?
+        .collect::<Result<Vec<_>, _>>()
+        .at(staging_root)?;
+    if entries.len() != 1 || entries[0].path() != staging_dir {
+        return Err(invalid(
+            "resume",
+            "staging wrapper must contain exactly one evidence directory",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_reopen_payload_files(staging_dir: &Path) -> Result<(), WaebError> {
+    let mut required = DATASETS
+        .iter()
+        .map(|dataset| dataset.path)
+        .collect::<BTreeSet<_>>();
+    required.extend([CHAT_COMPLETENESS_PATH, MEDIA_INDEX_PATH, LOG_PATH]);
+    let mut observed = BTreeSet::new();
+    for entry in WalkDir::new(staging_dir).follow_links(false) {
+        let entry = entry.map_err(|error| WaebError::Io {
+            path: error.path().unwrap_or(staging_dir).to_path_buf(),
+            source: std::io::Error::other(error.to_string()),
+        })?;
+        reject_symlink(entry.path())?;
+        if !entry.file_type().is_dir() && !entry.file_type().is_file() {
+            return Err(WaebError::UnsupportedEntry(entry.path().to_path_buf()));
+        }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = relative_path(
+            entry
+                .path()
+                .strip_prefix(staging_dir)
+                .map_err(|_| invalid("resume", "file escaped staging root"))?,
+        )?;
+        if required.contains(relative.as_str()) {
+            observed.insert(relative);
+        } else if !valid_raw_resume_path(&relative) && !valid_cas_resume_path(&relative) {
+            return Err(invalid(
+                "resume",
+                "unexpected file exists in streaming staging",
+            ));
+        }
+    }
+    if observed.len() != required.len() {
+        return Err(invalid(
+            "resume",
+            "required streaming payload file is missing",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_raw_resume_path(path: &str) -> bool {
+    let parts = path.split('/').collect::<Vec<_>>();
+    parts.len() == 5
+        && parts[0] == "data"
+        && parts[1] == "raw"
+        && matches!(parts[2], "baseline" | "enriched")
+        && matches!(
+            parts[3],
+            "store" | "indexeddb" | "dom" | "status" | "calls" | "channels" | "communities"
+        )
+        && matches!(
+            parts[4],
+            "accounts.ndjson"
+                | "contacts.ndjson"
+                | "chats.ndjson"
+                | "messages.ndjson"
+                | "entities.ndjson"
+                | "events.ndjson"
+                | "metadata.ndjson"
+        )
+}
+
+fn valid_cas_resume_path(path: &str) -> bool {
+    let parts = path.split('/').collect::<Vec<_>>();
+    parts.len() == 5
+        && parts[..3] == ["data", "media", "sha256"]
+        && parts[3].len() == 2
+        && parts[4].len() == 64
+        && parts[4].starts_with(parts[3])
+        && parts[4]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn valid_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn restore_dataset_stats(
+    staging_dir: &Path,
+    source_id: Uuid,
+) -> Result<[DatasetStats; 18], WaebError> {
+    let mut stats = [DatasetStats::default(); 18];
+    let source_id = source_id.to_string();
+    for (index, dataset) in DATASETS.iter().enumerate() {
+        let path = staging_dir.join(dataset.path);
+        reject_symlink(&path)?;
+        let metadata = fs::metadata(&path).at(&path)?;
+        if !metadata.is_file() {
+            return Err(invalid("resume", "normalized dataset is not a file"));
+        }
+        let mut reader = BufReader::new(File::open(&path).at(&path)?);
+        let mut bytes = 0_u64;
+        let mut records = 0_u64;
+        loop {
+            let mut line = Vec::new();
+            let count = reader.read_until(b'\n', &mut line).at(&path)?;
+            if count == 0 {
+                break;
+            }
+            if line.last() != Some(&b'\n') || line.len() == 1 {
+                return Err(invalid("resume", "normalized NDJSON line is not canonical"));
+            }
+            let value: Value = serde_json::from_slice(&line)?;
+            if canonicalize_evidence_line(&value)? != line
+                || value.get("recordType").and_then(Value::as_str) != Some(dataset.record_type)
+                || value.get("sourceId").and_then(Value::as_str) != Some(source_id.as_str())
+            {
+                return Err(invalid("resume", "normalized dataset binding changed"));
+            }
+            records = records
+                .checked_add(1)
+                .ok_or_else(|| invalid("resume", "record count overflow"))?;
+            bytes = bytes
+                .checked_add(
+                    u64::try_from(count)
+                        .map_err(|_| invalid("resume", "record byte count overflow"))?,
+                )
+                .ok_or_else(|| invalid("resume", "record byte count overflow"))?;
+        }
+        if bytes != metadata.len() {
+            return Err(invalid("resume", "normalized dataset length changed"));
+        }
+        stats[index] = DatasetStats { records, bytes };
+    }
+    Ok(stats)
+}
+
+fn restore_log_state(path: &Path) -> Result<LogChainState, WaebError> {
+    reject_symlink(path)?;
+    let mut reader = BufReader::new(File::open(path).at(path)?);
+    let mut state = LogChainState {
+        event_count: 0,
+        terminal_event_hash: None,
+        last_monotonic_offset_ns: 0,
+    };
+    loop {
+        let mut line = Vec::new();
+        let count = reader.read_until(b'\n', &mut line).at(path)?;
+        if count == 0 {
+            break;
+        }
+        if line.last() != Some(&b'\n') || line.len() == 1 {
+            return Err(invalid("resume", "acquisition log line is not canonical"));
+        }
+        let mut value: Value = serde_json::from_slice(&line)?;
+        if canonicalize_evidence_line(&value)? != line {
+            return Err(invalid("resume", "acquisition log line changed"));
+        }
+        let event_hash = value
+            .get("eventHash")
+            .and_then(Value::as_str)
+            .filter(|hash| valid_lower_hex(hash, 64))
+            .ok_or_else(|| invalid("resume", "acquisition log hash is invalid"))?
+            .to_owned();
+        let sequence = value
+            .get("sequence")
+            .and_then(Value::as_str)
+            .and_then(|text| text.parse::<u64>().ok())
+            .ok_or_else(|| invalid("resume", "acquisition log sequence is invalid"))?;
+        let monotonic_offset = value
+            .get("monotonicOffsetNs")
+            .and_then(Value::as_str)
+            .and_then(|text| text.parse::<u64>().ok())
+            .ok_or_else(|| invalid("resume", "acquisition log monotonic offset is invalid"))?;
+        let expected_sequence = state
+            .event_count
+            .checked_add(1)
+            .ok_or_else(|| invalid("resume", "acquisition log sequence overflow"))?;
+        let previous = value.get("previousEventHash");
+        let previous_matches = match &state.terminal_event_hash {
+            Some(hash) => previous.and_then(Value::as_str) == Some(hash.as_str()),
+            None => previous.is_some_and(Value::is_null),
+        };
+        if sequence != expected_sequence
+            || !previous_matches
+            || (state.event_count > 0 && monotonic_offset < state.last_monotonic_offset_ns)
+        {
+            return Err(invalid("resume", "acquisition log chain changed"));
+        }
+        value
+            .as_object_mut()
+            .ok_or_else(|| invalid("resume", "acquisition log event is not an object"))?
+            .remove("eventHash");
+        let mut hasher = Sha256::new();
+        hasher.update(LOG_DOMAIN);
+        match &state.terminal_event_hash {
+            Some(hash) => hasher.update(
+                hex::decode(hash).map_err(|_| invalid("resume", "previous log hash is invalid"))?,
+            ),
+            None => hasher.update([0_u8; 32]),
+        }
+        hasher.update(canonicalize_evidence(&value)?);
+        if hex::encode(hasher.finalize()) != event_hash {
+            return Err(invalid("resume", "acquisition log event hash changed"));
+        }
+        state.event_count = sequence;
+        state.terminal_event_hash = Some(event_hash);
+        state.last_monotonic_offset_ns = monotonic_offset;
+    }
+    if state.event_count == 0 {
+        return Err(WaebError::EmptyLog);
+    }
+    Ok(state)
 }
 
 #[cfg(windows)]
@@ -1544,12 +1839,21 @@ mod tests {
             chat_completeness_path: CHAT_COMPLETENESS_PATH.to_owned(),
             media_counts: MediaCountsDto {
                 requested: 0,
+                available: 0,
                 full: 0,
                 thumbnail: 0,
                 missing: 0,
                 expired: 0,
                 decrypt_error: 0,
-                not_requested: 0,
+                download_timeout: 0,
+                no_progress_timeout: 0,
+                too_large: 0,
+                disk_space_insufficient: 0,
+                hash_mismatch: 0,
+                transport_interrupted: 0,
+                canceled: 0,
+                unavailable: 0,
+                not_attempted: 0,
             },
             cross_checks: CrossChecksDto {
                 inventory_counts_match: true,
@@ -1726,7 +2030,7 @@ mod tests {
     }
 
     #[test]
-    fn production_payload_rejects_native_floats_and_unsafe_integers() {
+    fn production_payload_accepts_rfc8785_floats_and_rejects_unsafe_integers() {
         let temp = TempDir::new();
         let mut writer = WaebWriter::create(&temp.0, Uuid::new_v4())
             .unwrap_or_else(|error| panic!("create writer: {error}"));
@@ -1738,7 +2042,17 @@ mod tests {
                     RawStream::Metadata,
                     &json!({"value": 1.5}),
                 )
-                .is_err()
+                .is_ok()
+        );
+        assert!(
+            writer
+                .append_raw(
+                    RawPhase::Baseline,
+                    RawProvider::Store,
+                    RawStream::Metadata,
+                    &json!({"value": 3.0}),
+                )
+                .is_ok()
         );
         assert!(
             writer
@@ -1801,6 +2115,99 @@ mod tests {
                 .is_some_and(|parent| parent.to_string_lossy().ends_with(".partial"))
         );
         assert!(!final_path.exists());
+    }
+
+    #[test]
+    fn verified_streaming_staging_reopens_with_dataset_and_log_state() {
+        let temp = TempDir::new();
+        let evidence_id = Uuid::new_v4();
+        let source_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let mut writer = WaebWriter::create(&temp.0, evidence_id)
+            .unwrap_or_else(|error| panic!("writer: {error}"));
+        assert!(
+            writer
+                .append_normalized(
+                    "accounts",
+                    &json!({
+                        "schemaVersion": SCHEMA_VERSION,
+                        "recordType": "account",
+                        "recordId": "a".repeat(64),
+                        "sourceId": source_id,
+                    }),
+                )
+                .is_ok()
+        );
+        assert!(
+            writer
+                .append_log_event(
+                    session_id,
+                    "2026-01-15T08:00:00.000Z",
+                    0,
+                    LogEventType::AcquisitionStarted,
+                    &json!({"mode": "resume_test"}),
+                )
+                .is_ok()
+        );
+        drop(writer);
+
+        let mut reopened = WaebWriter::reopen_with_roots(&temp.0, &temp.0, evidence_id, source_id)
+            .unwrap_or_else(|error| panic!("reopen: {error}"));
+        assert_eq!(
+            reopened
+                .log_state()
+                .unwrap_or_else(|error| panic!("log: {error}"))
+                .event_count,
+            1
+        );
+        assert!(
+            reopened
+                .append_log_event(
+                    session_id,
+                    "2026-01-15T08:00:01.000Z",
+                    1,
+                    LogEventType::AcquisitionResumed,
+                    &json!({"generation": "1"}),
+                )
+                .is_ok()
+        );
+        assert_eq!(
+            reopened
+                .log_state()
+                .unwrap_or_else(|error| panic!("log: {error}"))
+                .event_count,
+            2
+        );
+    }
+
+    #[test]
+    fn reopen_rejects_an_unexpected_streaming_file() {
+        let temp = TempDir::new();
+        let evidence_id = Uuid::new_v4();
+        let source_id = Uuid::new_v4();
+        let mut writer = WaebWriter::create(&temp.0, evidence_id)
+            .unwrap_or_else(|error| panic!("writer: {error}"));
+        assert!(
+            writer
+                .append_log_event(
+                    Uuid::new_v4(),
+                    "2026-01-15T08:00:00.000Z",
+                    0,
+                    LogEventType::AcquisitionStarted,
+                    &json!({"mode": "resume_test"}),
+                )
+                .is_ok()
+        );
+        let unexpected = writer.staging_path().join("data/unexpected.bin");
+        assert!(fs::write(&unexpected, b"unexpected").is_ok());
+        drop(writer);
+        assert!(matches!(
+            WaebWriter::reopen_with_roots(&temp.0, &temp.0, evidence_id, source_id),
+            Err(WaebError::InvalidMetadata {
+                field: "resume",
+                ..
+            })
+        ));
     }
 
     #[test]

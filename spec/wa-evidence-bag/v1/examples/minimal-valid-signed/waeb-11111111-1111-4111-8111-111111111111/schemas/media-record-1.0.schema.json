@@ -21,7 +21,12 @@
     },
     "role": {"enum": ["full", "thumbnail", "transmitted_ciphertext", "decrypted_observable", "avatar"]},
     "kind": {"enum": ["image", "video", "audio", "voice", "document", "sticker", "contact_card", "other"]},
-    "acquisitionStatus": {"enum": ["available", "missing", "expired", "decrypt_error", "not_requested"]},
+    "acquisitionStatus": {"enum": [
+      "available", "missing", "expired", "decrypt_error", "download_timeout",
+      "no_progress_timeout", "too_large", "disk_space_insufficient",
+      "hash_mismatch", "transport_interrupted", "canceled", "unavailable",
+      "not_attempted"
+    ]},
     "cas": {
       "oneOf": [
         {"type": "null"},
@@ -62,20 +67,40 @@
     "acquisition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["method", "attempts", "capturedAtUtc", "errorCode"],
+      "required": [
+        "method", "attempts", "capturedAtUtc", "errorCode",
+        "capturedByteLength", "networkActionAttempted"
+      ],
       "properties": {
         "method": {"enum": ["blob_observed", "media_download", "media_decrypt", "inline_preview", "not_attempted"]},
         "attempts": {"type": "integer", "minimum": 0},
         "capturedAtUtc": {"type": ["string", "null"], "format": "date-time"},
-        "errorCode": {"type": ["string", "null"], "pattern": "^[a-z0-9_]{3,100}$"}
+        "errorCode": {"type": ["string", "null"], "pattern": "^[a-z0-9_]{3,100}$"},
+        "capturedByteLength": {"type": "integer", "minimum": 0},
+        "networkActionAttempted": {"type": "boolean"}
       }
     }
   },
   "allOf": [
     {
       "if": {"properties": {"acquisitionStatus": {"const": "available"}}},
-      "then": {"properties": {"cas": {"type": "object"}}},
-      "else": {"properties": {"cas": {"type": "null"}}}
+      "then": {
+        "properties": {
+          "cas": {"type": "object"},
+          "acquisition": {"properties": {"errorCode": {"type": "null"}}}
+        }
+      },
+      "else": {
+        "properties": {
+          "cas": {"type": "null"},
+          "acquisition": {
+            "properties": {
+              "errorCode": {"type": "string"},
+              "capturedByteLength": {"const": 0}
+            }
+          }
+        }
+      }
     }
   ]
 }

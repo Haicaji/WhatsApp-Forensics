@@ -7,10 +7,14 @@ Analysis Workstation 是整套 WhatsApp Web 快速取证系统中的实验室分
 1. 初始化工作站配置签名身份。
 2. 创建案件。
 3. 在案件中创建勘察员、独立证据签名密钥和签名任务。
-4. 在指定 U 盘根目录下只新增 `Field Collector/`，不删除或覆盖原有文件。
+4. Workstation 发行包内置经过清单校验的 Field Collector、独立校验器和浏览器扩展；在指定 U 盘根目录下只新增 `Field Collector/`，不要求用户另找文件，也不删除或覆盖原有文件。
 5. U 盘插回后，可从案件列表使用“自动接收取证 U 盘”。程序对每个 Evidence Bag 先运行独立校验器，再按签名任务自动匹配案件。
+6. 已经签发任务的 U 盘可使用“更新取证 U 盘”原位升级。Workstation 会先验证配置签名、任务与现有发行清单，再通过暂存、备份、复核和提交更新 Collector、独立校验器、扩展及 Adapter；勘察员密钥、任务、Evidence Bag、交接摘要和诊断数据均保持不变。中断或校验失败会自动回滚，不允许把其他 Workstation 签发或软件目录已被修改的 U 盘静默覆盖。
 6. 原始 Evidence Bag 只读归档到对应案件的 `sources/`；结构化数据幂等导入该案独立的 `case.sqlite`。
 7. 通过案件列表、聊天列表、消息视图、中文连续子串检索和完整性页面浏览结果。
+
+现场任务编号可直接按案件习惯填写；Workstation 会在签名和落盘前自动规范为
+`assignment-<任务编号>.json`，不要求使用者手工输入 `assignment-` 前缀。
 
 本版本不包含静态导出、MCP、Agent、报告生成、OCR/ASR 或 llama.cpp。这些模块以后只依赖稳定的 `EvidenceRepository`，不会直接读取或修改原始 Evidence Bag。
 
@@ -28,6 +32,8 @@ analysis-workstation/
 ```
 
 Electron 渲染器启用 `sandbox`、`contextIsolation`，禁用 Node integration、导航、新窗口、WebView 和所有权限请求。Preload 被打成单文件，仅暴露固定 IPC 方法；主进程使用自定义安全协议和 CSP。口令只经有界 IPC 与 Rust RPC 的 stdin 传递，不进入 argv、环境变量、日志或数据库。
+
+新建 Workstation 配置密钥或勘察员证据密钥时，口令至少为 8 个字符，并同时包含 ASCII 大写字母、小写字母、数字和符号。解锁既有密钥时只执行 8 字符与 1024 UTF-8 字节上限检查，以兼容此前已下发的合法 U 盘。强度规则只在 Analysis Workstation 创建新密钥时执行，现场 Collector 不要求勘察员理解或重复配置规则。
 
 ## 数据布局
 
@@ -73,7 +79,11 @@ node scripts/electron-cdp-smoke.mjs --port=9333 --mode=review
 pnpm package:portable
 ```
 
-输出为 `out/wafc-analysis-workstation-v0.1.0-windows-x64/` 及同名 ZIP。公开发布只有在源码树干净、HEAD 精确带 `analysis-workstation-v0.1.0` 标签，且内置 Field Collector 自身为 publishable 时才会在清单中标记 `publishable: true`；开发构建仍可运行，但不得冒充正式发行。
+当前修订版输出为 `out/wafc-analysis-workstation-v0.1.8-windows-x64/` 及同名 ZIP。公开发布只有在源码树干净、HEAD 精确带 `analysis-workstation-v0.1.8` 标签，且内置 Field Collector 自身为 publishable 时才会在清单中标记 `publishable: true`；开发构建仍可运行，但不得冒充正式发行。
+
+便携包中的下发载荷位于 `resources/field-collector-portable/`，包含 `field-collector.exe`、`waeb-verify.exe`、`extension/` 和发行清单。用户只需运行 Workstation，在案件中点击“生成完整取证 U 盘”；程序会校验内置载荷并复制到 U 盘的 `Field Collector/`，同时签发配置、勘察员密钥和任务。
+
+更新已有 U 盘时，应先关闭该 U 盘中的 Field Collector，再在案件列表点击“更新取证 U 盘”。界面只要求选择 U 盘并确认关闭程序，不要求勘察员选择文件或理解清单。更新记录会尽力写入 `diagnostics/software-updates/`；配置签名、任务有效期和 Evidence Bag 内容不会因软件更新而重签或改写。
 
 ## 取证边界
 

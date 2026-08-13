@@ -49,6 +49,18 @@ $apacheOverride = [pscustomobject]@{
     RelativePath = "standard\Apache-2.0.txt"
     Sha256 = "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
 }
+$accessKitOverrideFiles = @(
+    [pscustomobject]@{
+        RelativePath = $apacheOverride.RelativePath
+        Sha256 = $apacheOverride.Sha256
+        IsPrimary = $true
+    },
+    [pscustomobject]@{
+        RelativePath = "accesskit\LICENSE.chromium"
+        Sha256 = "f26a603276d24923a35db6ce4a7eb2ef89f61e050824c748d9b6adbd60acd8d4"
+        IsPrimary = $false
+    }
+)
 foreach ($packageLabel in @(
     "ecolor@0.33.3",
     "eframe@0.33.3",
@@ -72,6 +84,20 @@ foreach ($packageLabel in @("gl_generator@0.14.0", "khronos_api@3.1.0")) {
         Sha256 = $apacheOverride.Sha256
     })
 }
+foreach ($packageLabel in @(
+    "accesskit@0.21.1",
+    "accesskit_consumer@0.31.0",
+    "accesskit_windows@0.29.2"
+)) {
+    $AuditedLicenseOverrides.Add($packageLabel, [pscustomobject]@{
+        Spdx = "MIT OR Apache-2.0"
+        Files = $accessKitOverrideFiles
+    })
+}
+$AuditedLicenseOverrides.Add("accesskit_winit@0.29.2", [pscustomobject]@{
+    Spdx = "Apache-2.0"
+    Files = $accessKitOverrideFiles
+})
 
 function New-OrdinalMap {
     return [System.Collections.Generic.Dictionary[string, object]]::new(
@@ -397,32 +423,74 @@ function Get-AuditedLicenseOverride {
         [System.IO.Path]::DirectorySeparatorChar,
         [System.IO.Path]::AltDirectorySeparatorChar
     ) + [System.IO.Path]::DirectorySeparatorChar
-    $path = [System.IO.Path]::GetFullPath((Join-Path $LicenseOverrideRoot ([string] $override.RelativePath)))
-    if (-not $path.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Audited license override escapes its fixed root: $path"
+    $fileSpecs = @()
+    if ($null -ne $override.PSObject.Properties["Files"]) {
+        $fileSpecs = @($override.Files)
     }
-    Assert-NoReparseComponents -Path $path -RequireExisting
-    $file = Get-Item -LiteralPath $path -Force
-    if (-not ($file -is [System.IO.FileInfo]) -or
-        (($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) -or
-        $file.Length -le 0 -or
-        $file.Length -gt $MaxLicenseFileBytes) {
-        throw "Audited license override is not a safe bounded regular file: $path"
+    else {
+        $fileSpecs = @([pscustomobject]@{
+            RelativePath = $override.RelativePath
+            Sha256 = $override.Sha256
+            IsPrimary = $true
+        })
     }
-    $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actualHash -cne [string] $override.Sha256) {
-        throw "Audited license override hash mismatch for '$PackageLabel'"
+    if ($fileSpecs.Count -eq 0 -or $fileSpecs.Count -gt $MaxLicenseFilesPerPackage) {
+        throw "Audited license override for '$PackageLabel' has an invalid file count"
     }
-    $text = Read-StrictUtf8Text -Path $path -PackageLabel $PackageLabel
-    if ([string]::IsNullOrWhiteSpace($text)) {
-        throw "Audited license override is blank for '$PackageLabel'"
+
+    $seenPaths = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    $files = New-Object 'System.Collections.Generic.List[object]'
+    [long] $totalBytes = 0
+    [int] $primaryCount = 0
+    foreach ($fileSpec in $fileSpecs) {
+        $relativePath = [string] $fileSpec.RelativePath
+        if ([string]::IsNullOrWhiteSpace($relativePath)) {
+            throw "Audited license override for '$PackageLabel' has a blank path"
+        }
+        if (-not $seenPaths.Add($relativePath)) {
+            throw "Audited license override for '$PackageLabel' repeats a path: $relativePath"
+        }
+        $isPrimary = [bool] $fileSpec.IsPrimary
+        if ($isPrimary) {
+            $primaryCount++
+        }
+        $path = [System.IO.Path]::GetFullPath((Join-Path $LicenseOverrideRoot $relativePath))
+        if (-not $path.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Audited license override escapes its fixed root: $path"
+        }
+        Assert-NoReparseComponents -Path $path -RequireExisting
+        $file = Get-Item -LiteralPath $path -Force
+        if (-not ($file -is [System.IO.FileInfo]) -or
+            (($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) -or
+            $file.Length -le 0 -or
+            $file.Length -gt $MaxLicenseFileBytes) {
+            throw "Audited license override is not a safe bounded regular file: $path"
+        }
+        $totalBytes += [long] $file.Length
+        if ($totalBytes -gt $MaxLicenseBytesPerPackage) {
+            throw "Audited license override for '$PackageLabel' exceeds the aggregate byte limit"
+        }
+        $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualHash -cne [string] $fileSpec.Sha256) {
+            throw "Audited license override hash mismatch for '$PackageLabel': $relativePath"
+        }
+        $text = Read-StrictUtf8Text -Path $path -PackageLabel $PackageLabel
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            throw "Audited license override is blank for '$PackageLabel': $relativePath"
+        }
+        $files.Add([pscustomobject]@{
+            FullName = $path
+            RelativePath = "AUDITED_OVERRIDE/$($relativePath.Replace([char] '\', [char] '/'))"
+            Text = $text
+            IsPrimary = $isPrimary
+        })
     }
-    return [pscustomobject]@{
-        FullName = $path
-        RelativePath = "AUDITED_OVERRIDE/$($override.RelativePath.Replace([char] '\', [char] '/'))"
-        Text = $text
-        IsPrimary = $true
+    if ($primaryCount -eq 0) {
+        throw "Audited license override for '$PackageLabel' has no primary license text"
     }
+    return $files
 }
 
 function Read-StrictUtf8Text {
