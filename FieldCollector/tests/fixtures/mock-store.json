@@ -1,0 +1,17 @@
+{
+  "contacts": [
+    {"id": "me@c.us", "isMe": true, "name": "Test Account"},
+    {"id": "alice@c.us", "name": "Repeated title"}
+  ],
+  "chats": [
+    {
+      "id": "alice@c.us",
+      "title": "Repeated title",
+      "messages": [
+        {"id": "m1", "timestamp": 1700000000, "type": "chat", "body": "hello"},
+        {"id": "m1", "timestamp": 1700000000, "type": "chat", "body": "hello"}
+      ]
+    },
+    {"id": "group@g.us", "title": "Repeated title", "messages": []}
+  ]
+}

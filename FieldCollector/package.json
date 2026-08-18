@@ -1,0 +1,10 @@
+{
+  "name": "field-collector-prototype-assets",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-extractor.mjs",
+    "test": "node --test extractor/test/*.test.mjs extension/test/*.test.mjs"
+  }
+}
+

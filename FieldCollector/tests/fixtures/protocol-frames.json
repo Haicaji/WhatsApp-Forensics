@@ -1,0 +1,32 @@
+[
+  {
+    "protocol": "field-collector-extractor/1",
+    "sequence": "0",
+    "kind": "capabilities",
+    "payload": {"datasets": {"messages": {"status": "supported"}}}
+  },
+  {
+    "protocol": "field-collector-extractor/1",
+    "sequence": "1",
+    "kind": "chat_begin",
+    "payload": {"index": 1, "chatId": "alice@c.us", "chat": {"id": "alice@c.us", "title": "Alice"}}
+  },
+  {
+    "protocol": "field-collector-extractor/1",
+    "sequence": "2",
+    "kind": "dataset_batch",
+    "payload": {"dataset": "messages", "chatId": "alice@c.us", "records": [{"id": "m1", "text": "hello"}], "final": true}
+  },
+  {
+    "protocol": "field-collector-extractor/1",
+    "sequence": "3",
+    "kind": "chat_end",
+    "payload": {"chatId": "alice@c.us", "history": {"complete": true}}
+  },
+  {
+    "protocol": "field-collector-extractor/1",
+    "sequence": "4",
+    "kind": "complete",
+    "payload": {"status": "complete", "chats": 1, "messages": 1}
+  }
+]

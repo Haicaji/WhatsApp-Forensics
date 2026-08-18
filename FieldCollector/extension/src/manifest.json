@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "FieldCollector WhatsApp 提取连接器",
+  "short_name": "FieldCollector",
+  "version": "0.1.0",
+  "description": "把当前 WhatsApp Web 标签页连接到本机 FieldCollector 原型。",
+  "minimum_chrome_version": "116",
+  "permissions": ["activeTab", "debugger"],
+  "action": {
+    "default_title": "连接 FieldCollector",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "web_accessible_resources": [{
+    "resources": ["adapter/collector.iife.js"],
+    "matches": ["https://web.whatsapp.com/*"]
+  }],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' ws://127.0.0.1:17654"
+  }
+}

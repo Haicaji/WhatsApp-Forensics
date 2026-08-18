@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "field-collector-session/1",
+  "status": "complete",
+  "startedAt": "2026-08-18T00:00:00Z",
+  "finishedAt": "2026-08-18T00:00:01Z",
+  "chatCount": 0,
+  "summary": {"messages": 0},
+  "storage": {"format": "UTF-8 JSON and original files", "database": false, "archive": false}
+}
+
