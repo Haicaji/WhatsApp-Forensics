@@ -1,9 +1,0 @@
-{
-  "kty": "OKP",
-  "crv": "Ed25519",
-  "x": "xrnOezvT1J12ue-NN_83nnWfdisLaBnlQ94KsVp7SBc",
-  "d": "qHRRl9ypzzCks60WUiWhyWOtxezLAMuJC0KWa6KJmPg",
-  "use": "sig",
-  "kid": "waeb-fixture-test-key-1",
-  "comment": "PUBLIC TEST FIXTURE KEY - NEVER USE IN PRODUCTION"
-}
