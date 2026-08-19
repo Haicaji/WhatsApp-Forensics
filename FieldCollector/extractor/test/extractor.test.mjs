@@ -58,6 +58,17 @@ test("raw snapshot preserves fields and marks cycles", () => {
   assert.equal(snapshot.self.__fieldCollectorType, "Reference");
 });
 
+test("raw snapshots omit undefined fields and declared repeated collections", () => {
+  const {FC} = load();
+  const snapshot = FC.rawSnapshot({id: "chat", unused: undefined, msgs: [{id: "m1"}]}, {
+    omitKeys: FC.REPEATED_COLLECTION_KEYS
+  });
+  assert.equal(snapshot.id, "chat");
+  assert.equal("unused" in snapshot, false);
+  assert.equal("msgs" in snapshot, false);
+  assert.deepEqual(Array.from(snapshot.__fieldCollectorOmittedKeys), ["msgs"]);
+});
+
 test("current WhatsApp message keys use the $1 serialized id fallback", () => {
   const {FC} = load();
   assert.equal(
@@ -66,7 +77,76 @@ test("current WhatsApp message keys use the $1 serialized id fallback", () => {
   );
 });
 
-test("media payload bodies stay in raw JSON without becoming message text", () => {
+test("phone metadata normalizes phone WIDs and keeps device identity separately", () => {
+  const {FC} = load();
+  const phone = FC.phoneMetadata({_serialized: "8615396599307:4@c.us", user: "8615396599307", device: 4});
+  assert.equal(phone.phoneId, "8615396599307@c.us");
+  assert.equal(phone.phoneNumber, "8615396599307");
+  assert.equal(phone.formattedPhoneNumber, "+8615396599307");
+  assert.equal(phone.deviceId, "4");
+  assert.equal(phone.devicePhoneId, "8615396599307:4@c.us");
+});
+
+test("LID contacts resolve to phone identities through WAWebApiContact", async () => {
+  const {FC} = load();
+  const lid = {id: {_serialized: "259567069958235@lid"}, formattedName: "JJ"};
+  const identity = await FC.resolveContactIdentity(lid, {
+    async contactPhoneNumber(id) {
+      assert.equal(id._serialized, "259567069958235@lid");
+      return {_serialized: "8615880921237@c.us"};
+    }
+  });
+  assert.equal(identity.lidId, "259567069958235@lid");
+  assert.equal(identity.phoneId, "8615880921237@c.us");
+  assert.equal(identity.phoneNumber, "8615880921237");
+  assert.equal(identity.phoneSource, "WAWebApiContact.getPhoneNumber");
+});
+
+test("current account uses MeUser phone identity and merges the proven LID sibling", async () => {
+  const {FC} = load();
+  const lid = {id: {_serialized: "45046355239082@lid"}, formattedName: "H", isMe: false};
+  const pn = {id: {_serialized: "8615396599307@c.us"}, formattedName: "H", isMe: false};
+  const env = {
+    contactCollection: {getMeContact: () => lid},
+    meUser: {getMaybeMeDevicePn: () => ({_serialized: "8615396599307:0@c.us", user: "8615396599307", device: 0})},
+    contactPhoneNumber: id => id._serialized === "45046355239082@lid"
+      ? Promise.resolve({_serialized: "8615396599307@c.us"})
+      : null
+  };
+  const identities = await FC.collectContactIdentities([lid, pn], env);
+  assert.equal(identities.index.get("8615396599307@c.us").id, "8615396599307@c.us");
+  const account = await FC.accountRecord([lid, pn], identities, env);
+  assert.equal(account.id, "8615396599307@c.us");
+  assert.equal(account.lidId, "45046355239082@lid");
+  assert.equal(account.phoneNumber, "8615396599307");
+  assert.equal(account.deviceId, "0");
+  assert.equal(account.devicePhoneId, "8615396599307:0@c.us");
+  assert.equal(account.isMe, true);
+  assert.equal(account.accountSource, "WAWebUserPrefsMeUser");
+});
+
+test("chat and participant records use native identity links without matching names", async () => {
+  const {FC} = load();
+  const lid = {id: {_serialized: "person@lid"}, formattedName: "Same"};
+  const unrelated = {id: {_serialized: "8615000000000@c.us"}, formattedName: "Same"};
+  const identities = await FC.collectContactIdentities([lid, unrelated], {});
+  assert.equal(identities.index.get("person@lid").phoneId, null);
+  const unresolved = FC.chatRecord({id: {_serialized: "person@lid"}, formattedTitle: "Same"}, identities.index);
+  assert.equal(unresolved.phoneNumber, null);
+
+  const linkedIdentity = {...identities.index.get("person@lid"), phoneId: "8615880921237@c.us", phoneNumber: "8615880921237", formattedPhoneNumber: "+8615880921237"};
+  identities.index.set("person@lid", linkedIdentity);
+  const chat = FC.chatRecord({id: {_serialized: "person@lid"}, formattedTitle: "Same"}, identities.index);
+  assert.equal(chat.contactId, "person@lid");
+  assert.equal(chat.formattedPhoneNumber, "+8615880921237");
+  const participants = FC.participantsForChat({
+    id: {_serialized: "group@g.us"},
+    groupMetadata: {participants: {_models: [{id: {_serialized: "person@lid"}}]}}
+  }, {}, identities.index);
+  assert.equal(participants[0].phoneId, "8615880921237@c.us");
+});
+
+test("media payload bodies are omitted from compact message records", () => {
   const {FC} = load();
   const payload = "/9j/" + "A".repeat(512);
   const record = FC.messageRecord({
@@ -76,7 +156,7 @@ test("media payload bodies stay in raw JSON without becoming message text", () =
     mimetype: "image/jpeg"
   }, "chat@c.us");
   assert.equal(record.text, null);
-  assert.equal(record.raw.body, payload);
+  assert.equal("raw" in record, false);
 });
 
 test("dataset batches are bounded by record count and serialized size", () => {
@@ -115,6 +195,164 @@ test("dynamic chat queue absorbs new chats and replaces native-id duplicates", (
   assert.equal(FC.absorbChats(queue, byId, env), 1);
   assert.equal(queue.length, 2);
   assert.equal(queue[0], refreshed);
+});
+
+test("private collection readers support current WhatsApp internal Maps", () => {
+  const {FC} = load();
+  const first = {id: "call-1"};
+  const second = {id: "call-2"};
+  const wrapper = {minifiedPrivateKey: new Map([["one", first], ["two", second]])};
+  assert.deepEqual(Array.from(FC.collectionValues(wrapper), item => item.id), ["call-1", "call-2"]);
+  assert.equal(FC.collectionReadable(wrapper), true);
+});
+
+test("current status, call-log and newsletter module variants are detected", () => {
+  const {context, FC} = load();
+  const statusStore = {_models: []};
+  const callStore = {privateCalls: new Map()};
+  const channelStore = {_models: []};
+  const metadataStore = {_models: []};
+  const msgFindCallLog = async () => [];
+  const modules = {
+    WAWebStatusCollection: {StatusV3CollectionImpl: statusStore},
+    WAWebCallCollection: {default: callStore},
+    WAWebDBMessageFindLocal: {msgFindCallLog},
+    WAWebNewsletterCollection: {default: channelStore},
+    WAWebNewsletterMetadataCollection: {default: metadataStore}
+  };
+  context.require = name => modules[name] || null;
+  const detected = FC.detectModules();
+  assert.equal(detected.env.statuses, statusStore);
+  assert.equal(detected.env.calls, callStore);
+  assert.equal(typeof detected.env.msgFindCallLog, "function");
+  assert.equal(detected.env.channels, channelStore);
+  assert.equal(detected.env.channelMetadata, metadataStore);
+  assert.equal(detected.capabilities.datasets.calls.status, "supported");
+});
+
+test("historical call logs use the dedicated database query and native ids", async () => {
+  const {FC} = load();
+  const calls = [
+    {id: {_serialized: "call-new"}, t: 20, fromMe: true, to: {_serialized: "peer@c.us"}, isVideoCall: true},
+    {id: {_serialized: "call-old"}, t: 10, fromMe: false, from: {_serialized: "caller@c.us"}, callDuration: 42}
+  ];
+  let queries = 0;
+  const result = await FC.collectCalls({
+    calls: {privateMap: new Map()},
+    async msgFindCallLog(params) {
+      queries += 1;
+      assert.equal(params.count, 1_000);
+      return queries === 1 ? calls : [];
+    }
+  });
+  assert.equal(result.status, "supported");
+  assert.equal(queries, 2);
+  assert.deepEqual(Array.from(result.records, record => record.id), ["call-old", "call-new"]);
+  assert.equal(result.records[0].peerId, "caller@c.us");
+  assert.equal(result.records[0].durationSeconds, 42);
+  assert.equal(result.records[1].peerId, "peer@c.us");
+  assert.equal(result.records[1].direction, "outgoing");
+});
+
+test("an empty transient call collection is not reported as historical success", async () => {
+  const {FC} = load();
+  const result = await FC.collectCalls({calls: {privateMap: new Map()}});
+  assert.equal(result.status, "unavailable");
+  assert.equal(result.reason, "historical_call_query_unavailable_and_call_collection_empty");
+  assert.equal(result.records.length, 0);
+});
+
+test("status V3 collection is synchronized and saved as grouped status items", async () => {
+  const {FC} = load();
+  const parent = {
+    id: {_serialized: "owner@status"},
+    unreadCount: 1,
+    totalCount: 1,
+    msgs: {_models: [{id: {_serialized: "status-message"}, t: 100, type: "image", caption: "today"}]},
+    async loadMore() { return []; }
+  };
+  const store = {
+    _models: [],
+    async sync() { this._models.push(parent); }
+  };
+  const result = await FC.collectStatuses({statuses: store});
+  assert.equal(result.status, "supported");
+  assert.equal(result.records.length, 1);
+  assert.equal(result.records[0].id, "owner@status");
+  assert.equal(result.records[0].items[0].id, "status-message");
+  assert.equal(result.records[0].items[0].caption, "today");
+});
+
+test("joined channels load newsletter membership metadata and exclude guests", async () => {
+  const {FC} = load();
+  const joined = {
+    id: {_serialized: "joined@newsletter"},
+    name: "Joined",
+    msgs: {_models: [{id: {_serialized: "post-1"}, t: Math.floor(Date.now() / 1000), body: "news"}]}
+  };
+  const guest = {id: {_serialized: "guest@newsletter"}, name: "Guest", msgs: {_models: []}};
+  const metadata = {
+    async update(id) {
+      const serialized = FC.idString(id);
+      const channel = serialized === "joined@newsletter" ? joined : guest;
+      channel.newsletterMetadata = {
+        membershipType: serialized === "joined@newsletter" ? "subscriber" : "guest",
+        description: `${serialized} description`
+      };
+      return channel.newsletterMetadata;
+    }
+  };
+  const result = await FC.collectChannels({channels: {_models: [joined, guest]}, channelMetadata: metadata});
+  assert.equal(result.status, "supported");
+  assert.equal(result.records.length, 1);
+  assert.equal(result.records[0].id, "joined@newsletter");
+  assert.equal(result.records[0].membershipType, "subscriber");
+  assert.equal(result.records[0].isJoined, true);
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0].channelId, "joined@newsletter");
+});
+
+test("channel extraction keeps only the configured rolling window and exposes media models", async () => {
+  const {FC} = load();
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const recent = {id: {_serialized: "recent"}, t: nowSeconds - 2 * 86400, type: "image", mimetype: "image/jpeg"};
+  const old = {id: {_serialized: "old"}, t: nowSeconds - 20 * 86400, type: "image", mimetype: "image/jpeg"};
+  const channel = {
+    id: {_serialized: "joined@newsletter"},
+    name: "Joined",
+    membershipType: "subscriber",
+    msgs: {_models: [old, recent]}
+  };
+  const result = await FC.collectChannels({channels: {_models: [channel]}, msgGetters: {}}, () => false, {days: 15});
+  assert.deepEqual(Array.from(result.events, event => event.id), ["recent"]);
+  assert.equal(result.mediaMessages.length, 1);
+  assert.equal(result.mediaMessages[0].message, recent);
+  assert.equal(result.records[0].windowDays, 15);
+});
+
+test("acquisition policy is bounded and defaults remain enabled", () => {
+  const {FC} = load();
+  const defaults = FC.normalizePolicy();
+  assert.equal(defaults.includeChannels, true);
+  assert.equal(defaults.channelDays, 15);
+  assert.equal(defaults.maxMediaBytes, 0);
+  const bounded = FC.normalizePolicy({includeChannels: false, channelDays: 99999, maxMediaBytes: 1024});
+  assert.equal(bounded.includeChannels, false);
+  assert.equal(bounded.channelDays, 3650);
+  assert.equal(bounded.maxMediaBytes, 1024);
+});
+
+test("channel message collections are exported separately from compact channel raw data", () => {
+  const {FC} = load();
+  const channel = {
+    id: {_serialized: "channel@newsletter"},
+    msgs: {_models: [{id: {_serialized: "post1"}, t: 1, body: "post"}]}
+  };
+  const datasets = FC.globalDatasets({channels: {_models: [channel]}});
+  assert.equal(datasets.channels.length, 1);
+  assert.equal("msgs" in datasets.channels[0].raw, false);
+  assert.equal(datasets.channel_events.length, 1);
+  assert.equal(datasets.channel_events[0].chatId, "channel@newsletter");
 });
 
 test("duplicate titles are never sufficient to select a conversation", async () => {
@@ -231,6 +469,97 @@ test("expired media URLs and their expiry time are detected", () => {
   assert.equal(FC.mediaNeedsChatRefresh({clientUrl: url}, {}, 2000), true);
 });
 
+test("an expired media URL is fetched and decrypted before downloadMedia refresh", async () => {
+  const {context, FC} = load();
+  const expiredUrl = "https://mmg.whatsapp.net/file.enc?oe=00000001";
+  let fetchCalls = 0;
+  let downloadCalls = 0;
+  context.fetch = async url => {
+    fetchCalls += 1;
+    assert.equal(url, expiredUrl);
+    return {
+      ok: true,
+      arrayBuffer: async () => new Uint8Array(26).buffer
+    };
+  };
+  context.crypto = {subtle: {
+    importKey: async () => ({}),
+    decrypt: async () => new Uint8Array([1, 2, 3]).buffer
+  }};
+  const message = {
+    type: "image",
+    mimetype: "image/jpeg",
+    clientUrl: expiredUrl,
+    mediaKey: btoa("01234567890123456789012345678901"),
+    mediaData: {downloadMedia() { downloadCalls += 1; }}
+  };
+  const env = {
+    cryptoHkdf: {extractAndExpand: async () => new Uint8Array(112).buffer},
+    msgGetters: {
+      getDeprecatedMms3Url: item => item.clientUrl,
+      getMediaKey: item => item.mediaKey,
+      getType: item => item.type,
+      getMimetype: item => item.mimetype
+    }
+  };
+  const source = await FC.originalMedia(message, env, {
+    beforeRefresh: async () => { throw new Error("refresh must not run"); }
+  });
+  assert.equal(fetchCalls, 1);
+  assert.equal(downloadCalls, 0);
+  assert.equal(source.source, "expired_url_aes_cbc_buffered");
+  assert.equal(source.byteLength, 3);
+});
+
+test("a rejected old URL is retried after downloadMedia supplies a new URL", async () => {
+  const {context, FC} = load();
+  const oldUrl = "https://mmg.whatsapp.net/old.enc?oe=00000001";
+  const newUrl = "https://mmg.whatsapp.net/new.enc?oe=ffffffff";
+  const requestedUrls = [];
+  context.fetch = async url => {
+    requestedUrls.push(url);
+    if (url === oldUrl) return {ok: false, status: 403};
+    return {ok: true, arrayBuffer: async () => new Uint8Array(26).buffer};
+  };
+  context.crypto = {subtle: {
+    importKey: async () => ({}),
+    decrypt: async () => new Uint8Array([4, 5, 6]).buffer
+  }};
+  let refreshContextCalls = 0;
+  let downloadCalls = 0;
+  const message = {
+    type: "image",
+    mimetype: "image/jpeg",
+    clientUrl: oldUrl,
+    mediaKey: btoa("01234567890123456789012345678901")
+  };
+  message.mediaData = {
+    downloadMedia() {
+      downloadCalls += 1;
+      message.clientUrl = newUrl;
+    }
+  };
+  const env = {
+    cryptoHkdf: {extractAndExpand: async () => new Uint8Array(112).buffer},
+    msgGetters: {
+      getDeprecatedMms3Url: item => item.clientUrl,
+      getMediaKey: item => item.mediaKey,
+      getType: item => item.type,
+      getMimetype: item => item.mimetype
+    }
+  };
+  const source = await FC.originalMedia(message, env, {
+    beforeRefresh: async current => {
+      refreshContextCalls += 1;
+      return current;
+    }
+  });
+  assert.deepEqual(requestedUrls, [oldUrl, newUrl]);
+  assert.equal(refreshContextCalls, 1);
+  assert.equal(downloadCalls, 1);
+  assert.equal(source.source, "refreshed_url_aes_cbc_buffered");
+});
+
 test("media refresh resolves the newest message model after reopening a chat", () => {
   const {FC} = load();
   const original = {id: {_serialized: "m1"}, clientUrl: "old"};
@@ -256,7 +585,10 @@ test("message body thumbnails are exported only as previews", async () => {
 test("original media failures preserve a diagnostic reason", async () => {
   const {FC} = load();
   await assert.rejects(
-    FC.originalMedia({type: "image"}, {msgGetters: {}}),
+    FC.originalMedia(
+      {type: "image", clientUrl: "https://mmg.whatsapp.net/file.enc?oe=00000001"},
+      {msgGetters: {}}
+    ),
     /media_hkdf_unavailable/
   );
 });
@@ -301,6 +633,28 @@ test("unknown-size media streams are forwarded in bounded chunks", async () => {
   assert.equal(result.byteLength, payload.byteLength);
   assert.ok(chunkSizes.every(size => size <= 128 * 1024));
   assert.equal(chunkSizes.length, 3);
+});
+
+test("unknown-size streams stop before exceeding the attachment policy limit", async () => {
+  const {FC} = load();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(80).fill(1));
+      controller.enqueue(new Uint8Array(80).fill(2));
+      controller.close();
+    }
+  });
+  let received = 0;
+  await assert.rejects(
+    FC.streamMediaSource(
+      FC.mediaSourceFrom(stream, "limited"),
+      chunk => { received += chunk.byteLength; },
+      () => false,
+      {chunkBytes: 80, maxBytes: 100}
+    ),
+    /media_size_limit_exceeded/
+  );
+  assert.equal(received, 80);
 });
 
 test("observable blobs are streamed without making an eager byte-array copy", async () => {

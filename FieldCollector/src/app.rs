@@ -8,14 +8,15 @@ use std::sync::{Arc, mpsc};
 use eframe::egui::{self, Color32, RichText};
 
 use crate::acquisition::run_acquisition;
-use crate::protocol::AcquisitionEvent;
+use crate::protocol::{AcquisitionEvent, AcquisitionPolicy};
 use crate::transport::{GatewayEvent, GatewayHandle, start_gateway};
 use crate::viewer::ViewerState;
 
-const PRIMARY: Color32 = Color32::from_rgb(67, 56, 202);
+const PRIMARY: Color32 = Color32::from_rgb(0, 168, 132);
 const DANGER: Color32 = Color32::from_rgb(185, 28, 28);
 const SUCCESS: Color32 = Color32::from_rgb(21, 128, 61);
 const PAIRING_ALPHABET: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+const BUNDLED_CJK_FONT: &[u8] = include_bytes!("../assets/fonts/NotoSansCJKsc-Regular.otf");
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Page {
@@ -37,15 +38,17 @@ pub struct CollectorApp {
     cancellation: Arc<AtomicBool>,
     running: bool,
     status: String,
-    progress: Option<serde_json::Value>,
     error: Option<String>,
     latest_path: Option<PathBuf>,
     viewer: ViewerState,
+    policy: AcquisitionPolicy,
+    max_media_mib: u64,
 }
 
 impl CollectorApp {
     pub fn new(context: &egui::Context) -> Self {
         install_cjk_font(context);
+        install_dark_theme(context);
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let output_root = manifest_dir.join("exports").to_string_lossy().into_owned();
         let extension_directory = manifest_dir.join("extension/dist");
@@ -63,10 +66,11 @@ impl CollectorApp {
             cancellation: Arc::new(AtomicBool::new(false)),
             running: false,
             status: "正在启动本机扩展连接".to_owned(),
-            progress: None,
             error: None,
             latest_path: None,
             viewer: ViewerState::default(),
+            policy: AcquisitionPolicy::default(),
+            max_media_mib: 0,
         };
         app.restart_gateway();
         app
@@ -126,7 +130,11 @@ impl CollectorApp {
             while let Ok(event) = events.try_recv() {
                 match event {
                     AcquisitionEvent::Status(message) => self.status = message,
-                    AcquisitionEvent::Progress(progress) => self.progress = Some(progress),
+                    AcquisitionEvent::Progress(progress) => {
+                        if let Some(message) = progress_status(&progress) {
+                            self.status = message;
+                        }
+                    }
                     AcquisitionEvent::Complete(path) => {
                         self.running = false;
                         self.latest_path = Some(path.clone());
@@ -153,16 +161,17 @@ impl CollectorApp {
         let output_root = PathBuf::from(self.output_root.trim());
         self.cancellation = Arc::new(AtomicBool::new(false));
         let cancellation = Arc::clone(&self.cancellation);
+        self.policy.max_media_bytes = self.max_media_mib.saturating_mul(1024 * 1024);
+        let policy = self.policy.clone();
         let (events_tx, events_rx) = mpsc::channel();
         self.worker_events = Some(events_rx);
         self.running = true;
         self.error = None;
-        self.progress = None;
         "正在建立页面提取会话".clone_into(&mut self.status);
         let spawn_result = std::thread::Builder::new()
             .name("field-collector-acquisition".to_owned())
             .spawn(move || {
-                match run_acquisition(&gateway, &output_root, &cancellation, &events_tx) {
+                match run_acquisition(&gateway, &output_root, &cancellation, &events_tx, &policy) {
                     Ok(path) => {
                         let _ = events_tx.send(AcquisitionEvent::Complete(path));
                     }
@@ -178,10 +187,8 @@ impl CollectorApp {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn collect_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("WhatsApp Web 全量提取原型");
-        ui.label("输出标准 JSON 和原始媒体文件，不生成数据库、SQL、ZIP 或 Evidence Bag。");
-        ui.add_space(12.0);
         ui.group(|ui| {
             ui.heading("1. 加载浏览器扩展");
             ui.label("在 Chrome 扩展管理页启用开发者模式，加载下面的未打包扩展目录。");
@@ -221,7 +228,55 @@ impl CollectorApp {
         });
         ui.add_space(8.0);
         ui.group(|ui| {
-            ui.heading("3. 提取并保存");
+            ui.heading("3. 设置采集策略");
+            ui.horizontal_wrapped(|ui| {
+                ui.add_enabled(
+                    !self.running,
+                    egui::Checkbox::new(&mut self.policy.include_statuses, "动态"),
+                );
+                ui.add_enabled(
+                    !self.running,
+                    egui::Checkbox::new(&mut self.policy.include_calls, "通话记录"),
+                );
+                ui.add_enabled(
+                    !self.running,
+                    egui::Checkbox::new(&mut self.policy.include_channels, "频道"),
+                );
+                ui.add_enabled(
+                    !self.running,
+                    egui::Checkbox::new(&mut self.policy.include_chat_media, "聊天附件"),
+                );
+                ui.add_enabled(
+                    !self.running && self.policy.include_channels,
+                    egui::Checkbox::new(&mut self.policy.include_channel_media, "频道附件"),
+                );
+                ui.add_enabled(
+                    !self.running,
+                    egui::Checkbox::new(&mut self.policy.include_avatars, "头像/频道图片"),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("频道时间范围");
+                ui.add_enabled(
+                    !self.running && self.policy.include_channels,
+                    egui::DragValue::new(&mut self.policy.channel_days)
+                        .range(1..=3650)
+                        .suffix(" 天"),
+                );
+                ui.separator();
+                ui.label("单个附件上限");
+                ui.add_enabled(
+                    !self.running,
+                    egui::DragValue::new(&mut self.max_media_mib)
+                        .range(0..=1024 * 1024)
+                        .suffix(" MiB"),
+                );
+                ui.weak("0 表示不限制；未知大小的流会在达到上限时中止并删除临时内容");
+            });
+        });
+        ui.add_space(8.0);
+        ui.group(|ui| {
+            ui.heading("4. 提取并保存");
             ui.horizontal(|ui| {
                 ui.label("输出根目录");
                 ui.add_enabled(
@@ -232,22 +287,15 @@ impl CollectorApp {
                     open_folder(Path::new(&self.output_root));
                 }
             });
-            ui.colored_label(
-                Color32::from_rgb(180, 83, 9),
-                "全历史模式会打开/滚动会话并下载媒体，可能产生已读、缓存和网络请求。",
-            );
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(
-                        self.paired && !self.running,
-                        egui::Button::new("开始提取全部可访问内容"),
-                    )
+                    .add_enabled(self.paired && !self.running, egui::Button::new("开始提取"))
                     .clicked()
                 {
                     self.start_acquisition();
                 }
                 if ui
-                    .add_enabled(self.running, egui::Button::new("在当前文件边界取消"))
+                    .add_enabled(self.running, egui::Button::new("取消任务"))
                     .clicked()
                 {
                     self.cancellation.store(true, Ordering::SeqCst);
@@ -259,9 +307,6 @@ impl CollectorApp {
                     self.page = Page::View;
                 }
             });
-            if let Some(progress) = &self.progress {
-                ui.monospace(serde_json::to_string(progress).unwrap_or_default());
-            }
         });
     }
 }
@@ -272,10 +317,8 @@ impl eframe::App for CollectorApp {
         egui::TopBottomPanel::top("header").show(context, |ui| {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.heading(RichText::new("FieldCollector").color(PRIMARY));
-                ui.separator();
                 ui.selectable_value(&mut self.page, Page::Collect, "提取");
-                ui.selectable_value(&mut self.page, Page::View, "查看 JSON 与源文件");
+                ui.selectable_value(&mut self.page, Page::View, "查看数据与源文件");
             });
             ui.add_space(8.0);
         });
@@ -327,6 +370,33 @@ fn generate_pairing_code() -> String {
         .collect()
 }
 
+fn progress_status(progress: &serde_json::Value) -> Option<String> {
+    let phase = progress["phase"].as_str()?;
+    Some(match phase {
+        "global_datasets" => match progress["dataset"].as_str().unwrap_or_default() {
+            "statuses" => "正在提取动态".to_owned(),
+            "calls" => "正在提取通话记录".to_owned(),
+            "channels" => "正在提取频道".to_owned(),
+            dataset => format!("正在提取数据：{dataset}"),
+        },
+        "identity_resolution" => "正在解析账号与联系人信息".to_owned(),
+        "history" => format!(
+            "正在加载会话 {}/{}",
+            progress["chatIndex"].as_u64().unwrap_or(0),
+            progress["chatTotal"].as_u64().unwrap_or(0)
+        ),
+        "media_request" => "正在请求聊天附件".to_owned(),
+        "channel_media_request" => "正在请求频道附件".to_owned(),
+        "media_chat_reactivate" => "正在刷新附件下载地址".to_owned(),
+        "avatar_request" => format!(
+            "正在提取头像 {}/{}",
+            progress["avatarIndex"].as_u64().unwrap_or(0),
+            progress["avatarTotal"].as_u64().unwrap_or(0)
+        ),
+        _ => return None,
+    })
+}
+
 fn open_folder(path: &Path) {
     let _ = fs::create_dir_all(path);
     #[cfg(windows)]
@@ -334,20 +404,31 @@ fn open_folder(path: &Path) {
 }
 
 fn install_cjk_font(context: &egui::Context) {
-    #[cfg(windows)]
-    if let Ok(bytes) = fs::read(r"C:\Windows\Fonts\msyh.ttc") {
-        let mut fonts = egui::FontDefinitions::default();
-        fonts.font_data.insert(
-            "microsoft_yahei".to_owned(),
-            egui::FontData::from_owned(bytes).into(),
-        );
-        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-            fonts
-                .families
-                .entry(family)
-                .or_default()
-                .insert(0, "microsoft_yahei".to_owned());
-        }
-        context.set_fonts(fonts);
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "noto_sans_cjk_sc".to_owned(),
+        egui::FontData::from_static(BUNDLED_CJK_FONT).into(),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .insert(0, "noto_sans_cjk_sc".to_owned());
     }
+    context.set_fonts(fonts);
+}
+
+fn install_dark_theme(context: &egui::Context) {
+    let mut visuals = egui::Visuals::dark();
+    visuals.panel_fill = Color32::from_rgb(17, 27, 33);
+    visuals.window_fill = Color32::from_rgb(17, 27, 33);
+    visuals.extreme_bg_color = Color32::from_rgb(11, 20, 26);
+    visuals.faint_bg_color = Color32::from_rgb(32, 44, 51);
+    visuals.selection.bg_fill = Color32::from_rgb(0, 120, 102);
+    visuals.selection.stroke.color = Color32::from_rgb(233, 237, 239);
+    visuals.widgets.inactive.bg_fill = Color32::from_rgb(42, 57, 66);
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(55, 70, 79);
+    visuals.widgets.active.bg_fill = Color32::from_rgb(0, 120, 102);
+    context.set_visuals(visuals);
 }

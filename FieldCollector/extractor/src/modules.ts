@@ -19,20 +19,36 @@ FC.moduleValue = function moduleValue(found, names) {
   return found.module.default || found.module;
 };
 
+FC.moduleFunction = function moduleFunction(found, names) {
+  if (!found?.module) return null;
+  const containers = [found.module, found.module.default].filter(Boolean);
+  for (const container of containers) {
+    for (const name of names) {
+      if (typeof container[name] === "function") return container[name].bind(container);
+    }
+  }
+  return null;
+};
+
 FC.detectModules = function detectModules() {
   const found = {
     contacts: FC.safeRequire(["WAWebContactCollection"]),
     chats: FC.safeRequire(["WAWebChatCollection"]),
     msgGetters: FC.safeRequire(["WAWebMsgGetters"]),
     contactGetters: FC.safeRequire(["WAWebContactGetters"]),
+    apiContact: FC.safeRequire(["WAWebApiContact"]),
     meUser: FC.safeRequire(["WAWebUserPrefsMeUser"]),
     history: FC.safeRequire(["WAWebChatLoadMessages"]),
     profilePictures: FC.safeRequire(["WAWebProfilePicThumbCollection"]),
     reactions: FC.safeRequire(["WAWebReactionsCollection", "WAWebReactionCollection"]),
     receipts: FC.safeRequire(["WAWebMsgInfoCollection", "WAWebReceiptCollection"]),
-    statuses: FC.safeRequire(["WAWebStatusV3Collection", "WAWebStatusCollection"]),
+    statuses: FC.safeRequire(["WAWebStatusCollection", "WAWebStatusV3Collection"]),
+    textStatuses: FC.safeRequire(["WAWebTextStatusCollection"]),
     calls: FC.safeRequire(["WAWebCallCollection", "WAWebCallLogCollection"]),
-    channels: FC.safeRequire(["WAWebNewsletterCollection", "WAWebNewsletterMetadataCollection"]),
+    callLogQuery: FC.safeRequire(["WAWebDBMessageFindLocal"]),
+    channels: FC.safeRequire(["WAWebNewsletterCollection"]),
+    channelMetadata: FC.safeRequire(["WAWebNewsletterMetadataCollection"]),
+    channelHistory: FC.safeRequire(["WAWebNewsletterLoadMessages", "WAWebNewsletterLoadMessagesJob"]),
     groupMetadata: FC.safeRequire(["WAWebGroupMetadataCollection"]),
     communities: FC.safeRequire(["WAWebCommunityCollection", "WAWebCommunityMetadataCollection"]),
     presence: FC.safeRequire(["WAWebPresenceCollection"]),
@@ -50,14 +66,23 @@ FC.detectModules = function detectModules() {
     chatCollection: FC.moduleValue(found.chats, ["ChatCollection"]),
     msgGetters: FC.moduleValue(found.msgGetters, ["MsgGetters"]),
     contactGetters: FC.moduleValue(found.contactGetters, ["ContactGetters"]),
+    contactPhoneNumber: FC.moduleFunction(found.apiContact, ["getPhoneNumber"]),
     meUser: FC.moduleValue(found.meUser, ["UserPrefsMeUser"]),
     historyLoader: FC.moduleValue(found.history, ["ChatLoadMessages"]),
     profilePictures: FC.moduleValue(found.profilePictures, ["ProfilePicThumbCollection"]),
     reactions: FC.moduleValue(found.reactions, ["ReactionsCollection", "ReactionCollection"]),
     receipts: FC.moduleValue(found.receipts, ["MsgInfoCollection", "ReceiptCollection"]),
-    statuses: FC.moduleValue(found.statuses, ["StatusV3Collection", "StatusCollection"]),
-    calls: FC.moduleValue(found.calls, ["CallCollection", "CallLogCollection"]),
+    statuses: FC.moduleValue(found.statuses, [
+      "StatusV3CollectionImpl", "StatusV3Collection", "StatusCollectionImpl", "StatusCollection"
+    ]),
+    textStatuses: FC.moduleValue(found.textStatuses, ["TextStatusCollectionImpl", "TextStatusCollection"]),
+    calls: FC.moduleValue(found.calls, ["CallCollectionImpl", "CallCollection", "CallLogCollection"]),
+    msgFindCallLog: FC.moduleFunction(found.callLogQuery, ["msgFindCallLog"]),
     channels: FC.moduleValue(found.channels, ["NewsletterCollection", "NewsletterMetadataCollection"]),
+    channelMetadata: FC.moduleValue(found.channelMetadata, [
+      "NewsletterMetadataCollection", "WAWebNewsletterMetadataCollection"
+    ]),
+    channelHistory: FC.moduleValue(found.channelHistory, ["NewsletterLoadMessages", "NewsletterLoadMessagesJob"]),
     groupMetadata: FC.moduleValue(found.groupMetadata, ["GroupMetadataCollection"]),
     communities: FC.moduleValue(found.communities, ["CommunityCollection", "CommunityMetadataCollection"]),
     presence: FC.moduleValue(found.presence, ["PresenceCollection"]),
@@ -86,10 +111,13 @@ FC.detectModules = function detectModules() {
     receipts: supported(Boolean(env.receipts || env.chatCollection), found.receipts?.name || found.chats?.name),
     poll_votes: supported(Boolean(env.chatCollection), found.chats?.name),
     group_events: supported(Boolean(env.chatCollection), found.chats?.name),
-    statuses: supported(Boolean(env.statuses), found.statuses?.name),
-    calls: supported(Boolean(env.calls), found.calls?.name),
-    channels: supported(Boolean(env.channels), found.channels?.name),
-    channel_events: supported(Boolean(env.channels), found.channels?.name),
+    statuses: supported(FC.collectionReadable(env.statuses), found.statuses?.name, "status_collection_unreadable"),
+    calls: supported(Boolean(env.msgFindCallLog || FC.collectionReadable(env.calls)),
+      found.callLogQuery?.name || found.calls?.name, "call_log_source_unavailable"),
+    channels: supported(FC.collectionReadable(env.channels),
+      [found.channels?.name, found.channelMetadata?.name].filter(Boolean).join("+") || null,
+      "newsletter_collection_unreadable"),
+    channel_events: supported(FC.collectionReadable(env.channels), found.channels?.name, "newsletter_collection_unreadable"),
     communities: supported(Boolean(env.communities), found.communities?.name),
     community_relations: supported(Boolean(env.communities), found.communities?.name),
     presence_snapshots: supported(Boolean(env.presence), found.presence?.name),
@@ -105,6 +133,9 @@ FC.detectModules = function detectModules() {
       whatsappBuild: String(globalThis.Debug?.VERSION || globalThis.Build?.VERSION || "unknown"),
       datasets: capabilities,
       features: {
+        phone_resolution: supported(Boolean(env.contactPhoneNumber || env.meUser),
+          [found.apiContact?.name, found.meUser?.name].filter(Boolean).join("+") || null,
+          "phone_identity_modules_unavailable"),
         media_decryption: supported(Boolean(env.cryptoHkdf?.extractAndExpand), found.cryptoHkdf?.name, "media_hkdf_unavailable"),
         media_blob_cache: supported(Boolean(env.mediaBlobCache?.get), found.mediaBlobCache?.name, "media_blob_cache_unavailable")
       }

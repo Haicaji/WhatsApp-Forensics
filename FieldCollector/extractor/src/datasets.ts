@@ -2,16 +2,32 @@ FC.recordsFromCollection = function recordsFromCollection(dataset, collection) {
   return FC.collectionValues(collection).map((model, index) => FC.genericRecord(dataset, model, index));
 };
 
-FC.globalDatasets = function globalDatasets(env) {
+FC.recordsFromNestedCollection = function recordsFromNestedCollection(dataset, parents, keys) {
+  const records = [];
+  FC.collectionValues(parents).forEach(parent => {
+    const parentId = FC.idString(FC.first(parent, ["id", "wid", "jid"]));
+    FC.collectionValues(FC.first(parent, keys)).forEach(model => {
+      const record = FC.genericRecord(dataset, model, records.length);
+      if (!record.chatId) record.chatId = parentId;
+      records.push(record);
+    });
+  });
+  return records;
+};
+
+FC.globalDatasets = function globalDatasets(env, overrides = {}) {
   const chatLists = env.chatLists ? FC.recordsFromCollection("chat_lists", env.chatLists) :
     FC.collectionValues(env.labels).map((model, index) => FC.genericRecord("chat_lists", model, index));
   return {
     chat_lists: chatLists,
-    statuses: FC.recordsFromCollection("statuses", env.statuses),
-    calls: FC.recordsFromCollection("calls", env.calls),
-    channels: FC.recordsFromCollection("channels", env.channels),
-    channel_events: FC.recordsFromCollection("channel_events", env.channels)
-      .filter(record => record.raw?.messages || record.raw?.events),
+    statuses: overrides.statuses ?? FC.recordsFromCollection("statuses", env.statuses),
+    calls: overrides.calls ?? FC.recordsFromCollection("calls", env.calls),
+    channels: overrides.channels ?? FC.recordsFromCollection("channels", env.channels),
+    channel_events: overrides.channel_events ?? FC.recordsFromNestedCollection(
+      "channel_events",
+      env.channels,
+      ["channelEvents", "events", "messages", "msgs"]
+    ),
     communities: FC.recordsFromCollection("communities", env.communities),
     community_relations: FC.recordsFromCollection("community_relations", env.communities)
       .filter(record => record.raw?.groups || record.raw?.subgroups || record.raw?.parent),
@@ -22,7 +38,362 @@ FC.globalDatasets = function globalDatasets(env) {
   };
 };
 
-FC.participantsForChat = function participantsForChat(chat, env) {
+FC.datasetAwait = function datasetAwait(promise, timeoutMs, reason) {
+  if (typeof FC.mediaAwait === "function") return FC.mediaAwait(promise, timeoutMs, reason);
+  return FC.withTimeout(promise, timeoutMs);
+};
+
+FC.modelTimestampValue = function modelTimestampValue(model, keys) {
+  const value = FC.first(model, keys);
+  return value == null ? null : FC.timestamp({t: value});
+};
+
+FC.callRecord = function callRecord(model, index = 0) {
+  const key = FC.first(model, ["id", "key"]);
+  const id = FC.idString(key) || FC.idString(FC.first(model, ["callId", "stanzaId"])) || `call_${index}`;
+  const outgoingValue = FC.first(model, ["outgoing", "fromMe"]);
+  const peerId = FC.idString(FC.first(model, ["peerJid", "peerId", "chatId", "remote"]))
+    || FC.idString(outgoingValue ? FC.first(model, ["to", "recipient"]) : FC.first(model, ["from", "author"]))
+    || FC.chatId(model);
+  const participantValues = FC.collectionValues(FC.first(model, [
+    "groupCallParticipants", "callParticipants", "participants"
+  ]));
+  let state = FC.first(model, ["state", "callState", "result", "outcome"]);
+  try {
+    if (state == null && typeof model.getState === "function") state = model.getState();
+  } catch {}
+  const duration = FC.first(model, ["callDuration", "duration", "durationSeconds"]);
+  return {
+    id,
+    peerId,
+    timestamp: FC.modelTimestampValue(model, ["offerTime", "t", "timestamp", "ts", "createdAt"]),
+    durationSeconds: Number.isFinite(Number(duration)) ? Number(duration) : null,
+    direction: outgoingValue == null ? null : Boolean(outgoingValue) ? "outgoing" : "incoming",
+    isVideo: Boolean(FC.first(model, ["isVideo", "isVideoCall", "video"])),
+    isGroup: Boolean(FC.first(model, ["isGroup", "isGroupCall", "groupCall"])),
+    state: state == null ? null : String(state),
+    reason: FC.first(model, ["reason", "terminationReason", "callResult"]) ?? null,
+    participantIds: participantValues.map(item =>
+      FC.idString(FC.first(item, ["id", "wid", "jid", "participant", "userJid"])) || FC.idString(item)
+    ).filter(Boolean),
+    raw: FC.rawSnapshot(model, {omitKeys: FC.REPEATED_COLLECTION_KEYS})
+  };
+};
+
+FC.collectCalls = async function collectCalls(env, isCancelled = () => false) {
+  const models = new Map();
+  const remember = model => {
+    const record = FC.callRecord(model, models.size);
+    const key = record.id || `${record.timestamp || "unknown"}:${models.size}`;
+    models.set(key, model);
+  };
+  FC.collectionValues(env.calls).forEach(remember);
+  let queryError = null;
+  let queried = false;
+  if (typeof env.msgFindCallLog === "function") {
+    queried = true;
+    let anchor;
+    let previousAnchor = null;
+    let stableRounds = 0;
+    for (let page = 0; page < 200 && !isCancelled(); page += 1) {
+      try {
+        const params = {count: 1_000};
+        if (anchor) params.anchor = anchor;
+        const result = await FC.datasetAwait(
+          Promise.resolve(env.msgFindCallLog(params)), 30_000, "call_log_query_timeout"
+        );
+        const values = FC.collectionValues(result);
+        const before = models.size;
+        values.forEach(remember);
+        stableRounds = models.size === before ? stableRounds + 1 : 0;
+        if (values.length === 0 || stableRounds >= 2) break;
+        const oldest = values.reduce((candidate, item) => {
+          const time = Number(FC.first(item, ["offerTime", "t", "timestamp", "ts"]) || 0);
+          const candidateTime = Number(FC.first(candidate, ["offerTime", "t", "timestamp", "ts"]) || 0);
+          return !candidate || time < candidateTime ? item : candidate;
+        }, null);
+        anchor = FC.first(oldest, ["id", "key"]);
+        const anchorText = FC.idString(anchor);
+        if (!anchor || anchorText === previousAnchor) break;
+        previousAnchor = anchorText;
+      } catch (error) {
+        queryError = String(error?.message || error);
+        break;
+      }
+    }
+  }
+  const records = Array.from(models.values(), FC.callRecord)
+    .sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")));
+  if (!queried && !FC.collectionReadable(env.calls)) {
+    return {status: "unavailable", reason: "call_log_source_unavailable", records};
+  }
+  if (!queried && records.length === 0) {
+    return {
+      status: "unavailable",
+      reason: "historical_call_query_unavailable_and_call_collection_empty",
+      records
+    };
+  }
+  if (queryError && records.length === 0) {
+    return {status: "error", reason: queryError, records};
+  }
+  return {
+    status: "supported",
+    reason: queryError ? `partial_call_log:${queryError}` : null,
+    records,
+    source: queried ? "WAWebDBMessageFindLocal.msgFindCallLog" : "WAWebCallCollection"
+  };
+};
+
+FC.statusItemRecord = function statusItemRecord(model, ownerId) {
+  const record = FC.messageRecord(model, ownerId);
+  return {
+    ...record,
+    ownerId,
+    expiresAt: FC.modelTimestampValue(model, ["expireTs", "expiration", "expiresAt"])
+  };
+};
+
+FC.statusBundleRecord = function statusBundleRecord(model, messages, index = 0) {
+  const id = FC.idString(FC.first(model, ["id", "wid", "jid"])) || `status_${index}`;
+  const items = messages.map(message => FC.statusItemRecord(message, id))
+    .sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")));
+  return {
+    id,
+    contactId: FC.idString(FC.first(model, ["contact", "sender", "author"])) || id,
+    timestamp: FC.modelTimestampValue(model, ["t", "timestamp", "ts"]),
+    expiresAt: FC.modelTimestampValue(model, ["expireTs", "expiration", "expiresAt"]),
+    unreadCount: Number(FC.first(model, ["unreadCount"]) || 0),
+    totalCount: Number(FC.first(model, ["totalCount"]) || items.length),
+    readCount: Number(FC.first(model, ["readCount"]) || 0),
+    hasUnread: Boolean(FC.first(model, ["hasUnread"])),
+    items
+  };
+};
+
+FC.collectStatuses = async function collectStatuses(env, isCancelled = () => false) {
+  if (!FC.collectionReadable(env.statuses)) {
+    return {status: "unavailable", reason: "status_collection_unavailable", records: []};
+  }
+  let syncAttempted = false;
+  let syncError = null;
+  for (const method of ["sync", "loadMore"]) {
+    if (typeof env.statuses?.[method] !== "function" || isCancelled()) continue;
+    syncAttempted = true;
+    try {
+      await FC.datasetAwait(Promise.resolve(env.statuses[method]()), 30_000, `status_${method}_timeout`);
+    } catch (error) {
+      syncError = String(error?.message || error);
+    }
+    if (FC.collectionValues(env.statuses).length > 0) break;
+  }
+  const parents = FC.collectionValues(env.statuses);
+  const records = [];
+  for (let index = 0; index < parents.length && !isCancelled(); index += 1) {
+    const parent = parents[index];
+    const messages = new Map();
+    const absorb = values => FC.collectionValues(values).forEach(message => {
+      const id = FC.idString(FC.first(message, ["id", "key"])) || `status_item_${messages.size}`;
+      messages.set(id, message);
+    });
+    absorb(FC.first(parent, ["msgs", "messages"]));
+    try {
+      if (typeof parent.getAllMsgs === "function") absorb(parent.getAllMsgs());
+    } catch {}
+    let stableRounds = 0;
+    if (typeof parent.loadMore === "function") {
+      for (let round = 0; round < 20 && stableRounds < 2 && !isCancelled(); round += 1) {
+        const before = messages.size;
+        try {
+          absorb(await FC.datasetAwait(Promise.resolve(parent.loadMore()), 20_000, "status_history_timeout"));
+          absorb(FC.first(parent, ["msgs", "messages"]));
+          if (typeof parent.getAllMsgs === "function") absorb(parent.getAllMsgs());
+        } catch (error) {
+          syncError ||= String(error?.message || error);
+          break;
+        }
+        stableRounds = messages.size === before ? stableRounds + 1 : 0;
+      }
+    }
+    records.push(FC.statusBundleRecord(parent, Array.from(messages.values()), index));
+  }
+  if (records.length === 0 && syncError) return {status: "error", reason: syncError, records};
+  if (records.length === 0 && !syncAttempted) {
+    return {status: "unavailable", reason: "status_collection_empty_and_sync_unavailable", records};
+  }
+  return {
+    status: "supported",
+    reason: syncError ? `partial_statuses:${syncError}` : null,
+    records,
+    source: "WAWebStatusCollection"
+  };
+};
+
+FC.channelRecord = function channelRecord(model, index = 0, metadataOverride = null) {
+  const id = FC.idString(FC.first(model, ["id", "wid", "jid"])) || `channel_${index}`;
+  const metadata = metadataOverride || FC.first(model, ["newsletterMetadata", "channelMetadata", "metadata"]);
+  const membershipType = FC.first(metadata, ["membershipType", "viewerRole", "role"])
+    ?? FC.first(model, ["membershipType", "viewerRole", "role"])
+    ?? null;
+  const membership = membershipType == null ? null : String(membershipType);
+  const joined = membership == null ? null : !["guest", "none", "not_subscribed"].includes(membership.toLowerCase());
+  const mute = FC.first(model, ["mute", "newsletterMute"]);
+  return {
+    id,
+    title: FC.first(model, ["formattedTitle", "name", "title"]) || FC.first(metadata, ["name", "title"]) || id,
+    description: FC.first(metadata, ["description", "descriptionText", "about"]) ?? FC.first(model, ["description", "about"]) ?? null,
+    membershipType: membership,
+    isJoined: joined,
+    joinedEvidence: membership == null ? "present_in_newsletter_collection" : "newsletter_metadata_membership",
+    subscribersCount: FC.first(metadata, ["subscribersCount", "subscriberCount", "followersCount"]) ?? null,
+    verificationState: FC.first(metadata, ["verificationState", "verified", "isVerified"]) ?? null,
+    createdAt: FC.modelTimestampValue(metadata || model, ["creationTime", "createdAtTs", "createdAt"]),
+    unreadCount: Number(FC.first(model, ["unreadCount", "unread"]) || 0),
+    isMuted: Boolean(FC.first(model, ["isMuted"]) || (mute && FC.first(mute, ["expiration"]) !== 0)),
+    raw: FC.rawSnapshot(model, {omitKeys: FC.REPEATED_COLLECTION_KEYS})
+  };
+};
+
+FC.channelMessageModels = function channelMessageModels(channel) {
+  return FC.collectionValues(FC.first(channel, ["channelEvents", "events", "messages", "msgs"]));
+};
+
+FC.loadChannelWindow = async function loadChannelWindow(channel, env, cutoffMs, isCancelled = () => false) {
+  const messages = new Map();
+  const absorb = values => {
+    let added = 0;
+    for (const message of values) {
+      const id = FC.messageId(message);
+      if (!id) continue;
+      if (!messages.has(id)) added += 1;
+      messages.set(id, message);
+    }
+    return added;
+  };
+  absorb(FC.channelMessageModels(channel));
+  let rounds = 0;
+  let stableRounds = 0;
+  let reason = "window_already_materialized";
+  let complete = false;
+  while (!isCancelled() && rounds < 40) {
+    const dated = Array.from(messages.values())
+      .map(FC.timestampMillis)
+      .filter(value => value !== null);
+    const oldest = dated.length > 0 ? Math.min(...dated) : null;
+    if (oldest !== null && oldest <= cutoffMs) {
+      complete = true;
+      reason = "window_start_reached";
+      break;
+    }
+    const modelLoader = ["loadEarlierMsgs", "loadEarlierMessages", "loadMore"]
+      .find(name => typeof FC.read(channel, name) === "function");
+    const storeLoader = ["loadEarlierMsgs", "loadEarlierMessages", "loadMore"]
+      .find(name => typeof FC.read(env.channelHistory, name) === "function");
+    if (!modelLoader && !storeLoader) {
+      reason = messages.size > 0 ? "channel_history_loader_unavailable" : "channel_messages_unavailable";
+      break;
+    }
+    rounds += 1;
+    const before = messages.size;
+    try {
+      const result = modelLoader
+        ? await FC.datasetAwait(Promise.resolve(channel[modelLoader]()), 15_000, "channel_history_timeout")
+        : await FC.datasetAwait(Promise.resolve(env.channelHistory[storeLoader](channel)), 15_000, "channel_history_timeout");
+      absorb(FC.collectionValues(result));
+      absorb(FC.channelMessageModels(channel));
+    } catch (error) {
+      reason = `channel_history_error:${String(error?.message || error)}`;
+      break;
+    }
+    stableRounds = messages.size === before ? stableRounds + 1 : 0;
+    if (stableRounds >= 2) {
+      complete = true;
+      reason = "channel_history_end_confirmed";
+      break;
+    }
+  }
+  if (rounds >= 40 && !complete) reason = "channel_history_round_limit";
+  return {
+    messages: Array.from(messages.values()).filter(message => {
+      const timestamp = FC.timestampMillis(message);
+      return timestamp === null || timestamp >= cutoffMs;
+    }),
+    report: {complete, reason, rounds, cutoff: new Date(cutoffMs).toISOString()}
+  };
+};
+
+FC.collectChannels = async function collectChannels(env, isCancelled = () => false, options = {}) {
+  if (!FC.collectionReadable(env.channels)) {
+    return {status: "unavailable", reason: "newsletter_collection_unavailable", records: [], events: []};
+  }
+  const models = FC.collectionValues(env.channels);
+  const selectedModels = [];
+  const records = [];
+  let metadataError = null;
+  const days = Math.min(3650, Math.max(1, Number(options.days) || 15));
+  const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000;
+  const metadataFor = channel => {
+    const channelId = FC.idString(FC.first(channel, ["id", "wid", "jid"]));
+    const embedded = FC.first(channel, ["newsletterMetadata", "channelMetadata", "metadata"]);
+    if (embedded) return embedded;
+    try {
+      if (typeof env.channelMetadata?.get === "function") {
+        const exact = env.channelMetadata.get(FC.first(channel, ["id", "wid", "jid"]));
+        if (exact) return exact;
+      }
+    } catch {}
+    return FC.collectionValues(env.channelMetadata).find(item =>
+      FC.idString(FC.first(item, ["id", "wid", "jid", "newsletterId"])) === channelId
+    ) || null;
+  };
+  for (let index = 0; index < models.length && !isCancelled(); index += 1) {
+    const channel = models[index];
+    let metadata = metadataFor(channel);
+    if (!metadata && typeof env.channelMetadata?.update === "function") {
+      try {
+        const id = FC.first(channel, ["id", "wid", "jid"]);
+        const updated = await FC.datasetAwait(
+          Promise.resolve(env.channelMetadata.update(id)), 15_000, "channel_metadata_timeout"
+        );
+        metadata = updated || metadataFor(channel);
+      } catch (error) {
+        metadataError ||= String(error?.message || error);
+      }
+    }
+    const record = FC.channelRecord(channel, index, metadata);
+    // A guest is an observed/discovered channel, not one joined by this account.
+    if (record.isJoined === false) continue;
+    selectedModels.push(channel);
+    records.push(record);
+  }
+  const events = [];
+  const mediaMessages = [];
+  for (const channel of selectedModels) {
+    if (isCancelled()) break;
+    const channelId = FC.idString(FC.first(channel, ["id", "wid", "jid"]));
+    const window = await FC.loadChannelWindow(channel, env, cutoffMs, isCancelled);
+    const record = records.find(item => item.id === channelId);
+    if (record) {
+      record.windowDays = days;
+      record.windowStart = new Date(cutoffMs).toISOString();
+      record.historyComplete = window.report.complete;
+      record.historyReason = window.report.reason;
+    }
+    for (const message of window.messages) {
+      events.push({...FC.messageRecord(message, channelId), channelId});
+      if (FC.isMediaMessage(message, env)) mediaMessages.push({channelId, message});
+    }
+  }
+  events.sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")));
+  return {
+    status: "supported",
+    reason: metadataError ? `partial_channel_metadata:${metadataError}` : null,
+    records, events, mediaMessages,
+    source: "WAWebNewsletterCollection"
+  };
+};
+
+FC.participantsForChat = function participantsForChat(chat, env, identityIndex = new Map()) {
   const chatId = FC.idString(FC.first(chat, ["id", "wid"]));
   let metadata = FC.first(chat, ["groupMetadata", "metadata"]);
   if (!metadata) {
@@ -30,12 +401,20 @@ FC.participantsForChat = function participantsForChat(chat, env) {
       .find(item => FC.idString(FC.first(item, ["id", "wid"])) === chatId);
   }
   const participants = FC.collectionValues(FC.first(metadata, ["participants", "members"]));
-  return participants.map((model, index) => ({
-    id: FC.idString(FC.first(model, ["id", "wid"])) || `${chatId}_participant_${index}`,
-    chatId,
-    role: FC.read(model, "isSuperAdmin") ? "super_admin" : FC.read(model, "isAdmin") ? "admin" : "member",
-    raw: FC.rawSnapshot(model)
-  }));
+  return participants.map((model, index) => {
+    const id = FC.idString(FC.first(model, ["id", "wid"])) || `${chatId}_participant_${index}`;
+    const identity = identityIndex.get(id) || null;
+    return {
+      id,
+      chatId,
+      role: FC.read(model, "isSuperAdmin") ? "super_admin" : FC.read(model, "isAdmin") ? "admin" : "member",
+      name: identity?.displayName || identity?.name || null,
+      lidId: identity?.lidId || (/@lid$/i.test(id) ? id : null),
+      phoneId: identity?.phoneId || null,
+      phoneNumber: identity?.phoneNumber || null,
+      formattedPhoneNumber: identity?.formattedPhoneNumber || null
+    };
+  });
 };
 
 FC.flatten = function flatten(value) {
@@ -44,7 +423,7 @@ FC.flatten = function flatten(value) {
   return FC.collectionValues(value);
 };
 
-FC.chatDerivedDatasets = function chatDerivedDatasets(chat, messages, env) {
+FC.chatDerivedDatasets = function chatDerivedDatasets(chat, messages, env, identityIndex = new Map()) {
   const chatId = FC.idString(FC.first(chat, ["id", "wid"]));
   const messageRecords = messages.map(message => FC.messageRecord(message, chatId));
   const messageEvents = [];
@@ -75,7 +454,7 @@ FC.chatDerivedDatasets = function chatDerivedDatasets(chat, messages, env) {
     }
     const ack = FC.first(message, ["ack", "status"]);
     if (ack !== undefined && ack !== null) {
-      receipts.push({id: `${record.id}:ack`, chatId, messageId: record.id, state: ack, raw: FC.rawSnapshot(ack)});
+      receipts.push({id: `${record.id}:ack`, chatId, messageId: record.id, state: ack});
     }
     for (const [voteIndex, vote] of FC.flatten(FC.first(message, ["pollVotes", "votes", "selectedOptions"])).entries()) {
       pollVotes.push({
@@ -107,7 +486,7 @@ FC.chatDerivedDatasets = function chatDerivedDatasets(chat, messages, env) {
   const mediaAlbums = Array.from(albumMembers.entries(), ([id, messageIds]) => ({id, chatId, messageIds}));
   const pins = FC.recordsFromCollection("pins", env.pins).filter(record => record.chatId === chatId);
   return {
-    participants: FC.participantsForChat(chat, env),
+    participants: FC.participantsForChat(chat, env, identityIndex),
     messages: messageRecords,
     message_events: messageEvents,
     reactions,
@@ -133,4 +512,3 @@ FC.absorbChats = function absorbChats(queue, byId, env) {
   }
   return added;
 };
-

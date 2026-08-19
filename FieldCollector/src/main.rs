@@ -18,7 +18,7 @@ fn main() -> Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "FieldCollector JSON 提取原型",
+        "WhatsApp 网页现场快采",
         options,
         Box::new(|creation| Ok(Box::new(CollectorApp::new(&creation.egui_ctx)))),
     )

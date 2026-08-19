@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 
-use crate::protocol::{AcquisitionEvent, ExtractorFrame, cdp_value};
+use crate::protocol::{AcquisitionEvent, AcquisitionPolicy, ExtractorFrame, cdp_value};
 use crate::storage::SessionWriter;
 use crate::transport::GatewayHandle;
 
@@ -123,6 +123,7 @@ pub fn run_acquisition(
     output_root: &Path,
     cancellation: &Arc<AtomicBool>,
     events: &mpsc::Sender<AcquisitionEvent>,
+    policy: &AcquisitionPolicy,
 ) -> Result<PathBuf> {
     let _ = events.send(AcquisitionEvent::Status("正在等待扩展连接".to_owned()));
     gateway.wait_paired(Duration::from_secs(5))?;
@@ -152,7 +153,14 @@ pub fn run_acquisition(
         .ok_or_else(|| anyhow!("页面提取器没有返回控制器对象"))?
         .to_owned();
 
-    let result = run_controller(gateway, output_root, cancellation, events, &object_id);
+    let result = run_controller(
+        gateway,
+        output_root,
+        cancellation,
+        events,
+        &object_id,
+        policy,
+    );
     let _ = gateway.request(
         "Runtime.releaseObject",
         json!({"objectId": object_id}),
@@ -167,6 +175,7 @@ fn run_controller(
     cancellation: &Arc<AtomicBool>,
     events: &mpsc::Sender<AcquisitionEvent>,
     object_id: &str,
+    policy: &AcquisitionPolicy,
 ) -> Result<PathBuf> {
     let probe = call_controller(
         gateway,
@@ -189,11 +198,14 @@ fn run_controller(
         gateway,
         object_id,
         DISPATCH_FUNCTION,
-        &[json!({"value": {"command": "start_full"}})],
+        &[json!({"value": {
+            "command": "start_full",
+            "policy": serde_json::to_value(policy)?
+        }})],
     )?;
     anyhow::ensure!(start["accepted"] == true, "页面提取器拒绝开始命令");
     let _ = events.send(AcquisitionEvent::Status(
-        "正在提取全部可访问历史和原始媒体".to_owned(),
+        "正在按所选策略提取可访问数据和媒体".to_owned(),
     ));
 
     let mut expected_sequence = 0_u64;

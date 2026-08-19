@@ -11,11 +11,13 @@
     <h1>FieldCollector</h1>
     <p>请先在本机程序中启动连接，再输入一次性配对码。</p>
     <label for="pairing-code">配对码</label>
-    <input id="pairing-code" maxlength="10" autocomplete="off" spellcheck="false" placeholder="例如 7KMP4XQ2HF">
+    <div class="pairing-row">
+      <input id="pairing-code" maxlength="10" autocomplete="off" spellcheck="false" placeholder="例如 7KMP4XQ2HF">
+      <button id="paste" class="secondary" type="button">粘贴</button>
+    </div>
     <button id="connect" type="button">连接当前 WhatsApp 页面</button>
     <div id="status" role="status">等待连接</div>
   </main>
   <script src="popup.js"></script>
 </body>
 </html>
-

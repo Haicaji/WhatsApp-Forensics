@@ -85,14 +85,19 @@ FC.mediaUrlIsExpired = function mediaUrlIsExpired(value, now = Date.now()) {
   return expiry !== null && expiry <= now;
 };
 
-FC.mediaNeedsChatRefresh = function mediaNeedsChatRefresh(message, env, now = Date.now()) {
-  const url = FC.mediaHelperValue(
+FC.mediaUrl = function mediaUrl(message, env) {
+  const value = FC.mediaHelperValue(
     env,
     "getDeprecatedMms3Url",
     message,
     ["deprecatedMms3Url", "clientUrl", "url"]
   );
-  return typeof url === "string" && FC.mediaUrlIsExpired(url, now);
+  return typeof value === "string" && value.length > 0 ? value : null;
+};
+
+FC.mediaNeedsChatRefresh = function mediaNeedsChatRefresh(message, env, now = Date.now()) {
+  const url = FC.mediaUrl(message, env);
+  return url !== null && FC.mediaUrlIsExpired(url, now);
 };
 
 FC.detectMediaMime = function detectMediaMime(bytes, fallback = null) {
@@ -129,6 +134,7 @@ FC.streamMediaSource = async function streamMediaSource(source, onChunk, isCance
   const idleTimeoutMs = Number(options.idleTimeoutMs) > 0 ? Number(options.idleTimeoutMs) : 0;
   const deadlineAt = Number(options.deadlineAt) > 0 ? Number(options.deadlineAt) : 0;
   const abortController = options.abortController || null;
+  const maxBytes = Number(options.maxBytes) > 0 ? Number(options.maxBytes) : 0;
   let byteLength = 0;
   let complete = true;
   const remainingTotalMs = () => deadlineAt > 0 ? deadlineAt - Date.now() : Infinity;
@@ -151,6 +157,10 @@ FC.streamMediaSource = async function streamMediaSource(source, onChunk, isCance
         return;
       }
       const chunk = bytes.subarray(offset, Math.min(bytes.byteLength, offset + chunkBytes));
+      if (maxBytes > 0 && byteLength + chunk.byteLength > maxBytes) {
+        try { abortController?.abort("media_size_limit_exceeded"); } catch {}
+        throw new Error("media_size_limit_exceeded");
+      }
       await onChunk(chunk);
       byteLength += chunk.byteLength;
     }
@@ -239,7 +249,19 @@ FC.mediaHelperValue = function mediaHelperValue(env, method, message, fallbacks)
   return FC.first(message, fallbacks);
 };
 
-FC.mediaMeta = function mediaMeta(message, env, chatId, role = "original") {
+FC.mediaDeclaredSize = function mediaDeclaredSize(message) {
+  const mediaData = FC.first(message, ["mediaData", "mediaObject", "mediaInfo"]);
+  for (const value of [
+    FC.first(message, ["size", "fileSize", "mediaSize"]),
+    FC.first(mediaData, ["size", "fileSize", "mediaSize"])
+  ]) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  }
+  return null;
+};
+
+FC.mediaMeta = function mediaMeta(message, env, chatId, role = "original", scope = "chat") {
   const messageId = FC.messageId(message);
   const type = String(FC.mediaHelperValue(env, "getType", message, ["type", "kind"]) || "file");
   const vcard = type === "vcard" || type === "multi_vcard";
@@ -253,8 +275,9 @@ FC.mediaMeta = function mediaMeta(message, env, chatId, role = "original") {
       : `${type}_${messageId}${FC.mimeExtensions[mimeType] || FC.mimeExtensions[mimeBase] || ".bin"}`;
   }
   return {
-    scope: "chat",
+    scope,
     chatId,
+    channelId: scope === "channel" ? chatId : null,
     messageId,
     type,
     role,
@@ -270,8 +293,8 @@ FC.tryDownloadMedia = async function tryDownloadMedia(message, env, options = {}
   const waitMs = Number(options.waitMs) > 0 ? Number(options.waitMs) : 5_000;
   const pollMs = Number(options.pollMs) > 0 ? Number(options.pollMs) : 200;
   const requestTimeoutMs = Number(options.requestTimeoutMs) > 0 ? Number(options.requestTimeoutMs) : 15_000;
-  const initialUrl = FC.mediaHelperValue(env, "getDeprecatedMms3Url", message, ["deprecatedMms3Url", "clientUrl", "url"]);
-  const deadlineAt = Date.now() + waitMs;
+  const initialUrl = FC.mediaUrl(message, env);
+  const maxBytes = Number(options.maxBytes) > 0 ? Number(options.maxBytes) : 0;
   const failures = [];
   let attempted = false;
   for (const candidate of candidates) {
@@ -288,22 +311,36 @@ FC.tryDownloadMedia = async function tryDownloadMedia(message, env, options = {}
         "download_media_timeout"
       );
       const direct = FC.mediaSourceFrom(result, "downloadMedia_return");
-      if (direct) return direct;
+      if (direct) {
+        if (maxBytes > 0 && direct.byteLength !== null && direct.byteLength > maxBytes) {
+          throw new Error("media_size_limit_exceeded");
+        }
+        return direct;
+      }
       const resultBlob = FC.first(result, ["mediaBlob", "blob", "_blob"]);
       const nested = FC.mediaSourceFrom(resultBlob, "downloadMedia_return_blob");
-      if (nested) return nested;
-      while (Date.now() < deadlineAt) {
-        const populatedBlob = FC.blobFromMessage(message) || FC.cachedMediaBlob(message, env);
-        const populated = FC.mediaSourceFrom(populatedBlob, "downloadMedia_populated_blob");
-        if (populated) return populated;
-        const mediaStage = String(FC.read(FC.read(message, "mediaData"), "mediaStage") || "");
-        if (mediaStage.includes("ERROR")) throw new Error(`download_media_stage_${mediaStage}`);
-        const currentUrl = FC.mediaHelperValue(env, "getDeprecatedMms3Url", message, ["deprecatedMms3Url", "clientUrl", "url"]);
-        if (currentUrl && currentUrl !== initialUrl && !FC.mediaUrlIsExpired(String(currentUrl))) return null;
-        await FC.sleep(Math.min(pollMs, Math.max(1, deadlineAt - Date.now())));
+      if (nested) {
+        if (maxBytes > 0 && nested.byteLength !== null && nested.byteLength > maxBytes) {
+          throw new Error("media_size_limit_exceeded");
+        }
+        return nested;
       }
     } catch (error) {
       failures.push(FC.mediaErrorText(error));
+    }
+    const deadlineAt = Date.now() + waitMs;
+    while (Date.now() < deadlineAt) {
+      const populatedBlob = FC.blobFromMessage(message) || FC.cachedMediaBlob(message, env);
+      const populated = FC.mediaSourceFrom(populatedBlob, "downloadMedia_populated_blob");
+      if (populated) return populated;
+      const mediaStage = String(FC.read(FC.read(message, "mediaData"), "mediaStage") || "");
+      if (mediaStage.includes("ERROR")) {
+        failures.push(`download_media_stage_${mediaStage}`);
+        break;
+      }
+      const currentUrl = FC.mediaUrl(message, env);
+      if (currentUrl && currentUrl !== initialUrl) return null;
+      await FC.sleep(Math.min(pollMs, Math.max(1, deadlineAt - Date.now())));
     }
   }
   if (failures.length > 0) throw new Error(`download_media_failed: ${failures.join(" | ")}`);
@@ -311,7 +348,7 @@ FC.tryDownloadMedia = async function tryDownloadMedia(message, env, options = {}
   return null;
 };
 
-FC.legacyDecryptMedia = async function legacyDecryptMedia(message, env) {
+FC.legacyDecryptMedia = async function legacyDecryptMedia(message, env, options = {}) {
   const helper = env.msgGetters;
   const hkdf = env.cryptoHkdf;
   if (!helper) throw new Error("media_getters_unavailable");
@@ -320,7 +357,7 @@ FC.legacyDecryptMedia = async function legacyDecryptMedia(message, env) {
   let mediaKey;
   let mediaType;
   try {
-    url = helper.getDeprecatedMms3Url?.(message);
+    url = options.url || helper.getDeprecatedMms3Url?.(message);
     mediaKey = helper.getMediaKey?.(message);
     mediaType = helper.getType?.(message);
   } catch (error) {
@@ -328,10 +365,11 @@ FC.legacyDecryptMedia = async function legacyDecryptMedia(message, env) {
   }
   if (!url) throw new Error("media_url_unavailable");
   if (!mediaKey) throw new Error("media_key_unavailable");
+  const maxBytes = Number(options.maxBytes) > 0 ? Number(options.maxBytes) : 0;
   const expiry = FC.mediaUrlExpiry(String(url));
-  if (expiry !== null && expiry <= Date.now()) {
-    throw new Error(`media_url_expired_at_${new Date(expiry).toISOString()}`);
-  }
+  const expiryDiagnostic = expiry !== null && expiry <= Date.now()
+    ? `; media_url_expired_at_${new Date(expiry).toISOString()}`
+    : "";
   const labels = {
     image: "WhatsApp Image Keys", sticker: "WhatsApp Image Keys", video: "WhatsApp Video Keys",
     audio: "WhatsApp Audio Keys", ptt: "WhatsApp Audio Keys", document: "WhatsApp Document Keys"
@@ -339,58 +377,122 @@ FC.legacyDecryptMedia = async function legacyDecryptMedia(message, env) {
   const label = labels[mediaType];
   if (!label) throw new Error(`media_type_unsupported_${String(mediaType || "unknown")}`);
   const abortController = new AbortController();
-  const response = await FC.mediaAwait(
-    fetch(url, {signal: abortController.signal}),
-    20_000,
-    "media_request_timeout",
-    reason => abortController.abort(reason)
-  );
-  if (!response.ok) throw new Error(`media_http_${response.status}`);
-  const encryptedWithMac = new Uint8Array(await FC.mediaAwait(
-    response.arrayBuffer(),
-    30_000,
-    "media_response_timeout",
-    reason => abortController.abort(reason)
-  ));
+  let response;
+  try {
+    response = await FC.mediaAwait(
+      fetch(url, {signal: abortController.signal}),
+      Number(options.requestTimeoutMs) > 0 ? Number(options.requestTimeoutMs) : 20_000,
+      "media_request_timeout",
+      reason => abortController.abort(reason)
+    );
+  } catch (error) {
+    throw new Error(`${FC.mediaErrorText(error)}${expiryDiagnostic}`);
+  }
+  if (!response.ok) throw new Error(`media_http_${response.status}${expiryDiagnostic}`);
+  const responseLength = Number(response.headers?.get?.("content-length"));
+  if (maxBytes > 0 && Number.isFinite(responseLength) && responseLength > maxBytes + 10) {
+    abortController.abort("media_size_limit_exceeded");
+    throw new Error("media_size_limit_exceeded");
+  }
+  let encryptedWithMac;
+  try {
+    encryptedWithMac = new Uint8Array(await FC.mediaAwait(
+      response.arrayBuffer(),
+      Number(options.responseTimeoutMs) > 0 ? Number(options.responseTimeoutMs) : 30_000,
+      "media_response_timeout",
+      reason => abortController.abort(reason)
+    ));
+  } catch (error) {
+    throw new Error(`${FC.mediaErrorText(error)}${expiryDiagnostic}`);
+  }
   if (encryptedWithMac.length <= 10) throw new Error("media_encrypted_payload_too_short");
+  if (maxBytes > 0 && encryptedWithMac.length > maxBytes + 32) {
+    throw new Error("media_size_limit_exceeded");
+  }
   const encrypted = encryptedWithMac.slice(0, -10);
   const keyBytes = typeof mediaKey === "string" ? FC.base64ToBytes(mediaKey) : new Uint8Array(mediaKey);
   const expanded = new Uint8Array(await hkdf.extractAndExpand(keyBytes.buffer, label, 112));
   const key = await crypto.subtle.importKey("raw", expanded.slice(16, 48), {name: "AES-CBC"}, false, ["decrypt"]);
-  const clear = await crypto.subtle.decrypt({name: "AES-CBC", iv: expanded.slice(0, 16)}, key, encrypted);
-  return new Blob([clear]);
+  let clear;
+  try {
+    clear = await crypto.subtle.decrypt({name: "AES-CBC", iv: expanded.slice(0, 16)}, key, encrypted);
+  } catch (error) {
+    throw new Error(`media_decrypt_failed: ${FC.mediaErrorText(error)}${expiryDiagnostic}`);
+  }
+  if (clear.byteLength === 0) throw new Error(`media_decrypted_payload_empty${expiryDiagnostic}`);
+  if (maxBytes > 0 && clear.byteLength > maxBytes) throw new Error("media_size_limit_exceeded");
+  const mimeType = String(helper.getMimetype?.(message) || "");
+  return new Blob([clear], mimeType ? {type: mimeType} : undefined);
 };
 
-FC.originalMedia = async function originalMedia(message, env) {
-  const type = String(FC.mediaHelperValue(env, "getType", message, ["type", "kind"]) || "").toLowerCase();
+FC.originalMedia = async function originalMedia(message, env, options = {}) {
+  let activeMessage = message;
+  const maxBytes = Number(options.maxBytes) > 0 ? Number(options.maxBytes) : 0;
+  const declaredSize = FC.mediaDeclaredSize(activeMessage);
+  if (maxBytes > 0 && declaredSize !== null && declaredSize > maxBytes) {
+    throw new Error("media_size_limit_exceeded");
+  }
+  const type = String(FC.mediaHelperValue(env, "getType", activeMessage, ["type", "kind"]) || "").toLowerCase();
   if (type === "vcard" || type === "multi_vcard") {
-    const body = FC.mediaHelperValue(env, "getBody", message, ["body", "text"]);
+    const body = FC.mediaHelperValue(env, "getBody", activeMessage, ["body", "text"]);
     if (typeof body === "string" && body.length > 0) {
       return FC.mediaSourceFrom(new TextEncoder().encode(body), "vcard_body");
     }
   }
-  let blob = FC.blobFromMessage(message);
+  let blob = FC.blobFromMessage(activeMessage) || FC.cachedMediaBlob(activeMessage, env);
   if (blob) return FC.mediaSourceFrom(blob, "observable_blob");
   const failures = [];
+  const initialUrl = FC.mediaUrl(activeMessage, env);
+  if (initialUrl) {
+    try {
+      blob = await FC.legacyDecryptMedia(activeMessage, env, {url: initialUrl, maxBytes});
+      const source = FC.mediaSourceFrom(blob, FC.mediaUrlIsExpired(initialUrl)
+        ? "expired_url_aes_cbc_buffered"
+        : "direct_url_aes_cbc_buffered");
+      if (source) source.legacyBuffered = true;
+      if (source) return source;
+    } catch (error) {
+      failures.push(`initial_url: ${FC.mediaErrorText(error)}`);
+    }
+  } else {
+    failures.push("initial_url: media_url_unavailable");
+  }
+
+  if (typeof options.beforeRefresh === "function") {
+    try {
+      activeMessage = await options.beforeRefresh(activeMessage) || activeMessage;
+    } catch (error) {
+      failures.push(`refresh_context: ${FC.mediaErrorText(error)}`);
+    }
+  }
+
+  blob = FC.blobFromMessage(activeMessage) || FC.cachedMediaBlob(activeMessage, env);
+  if (blob) return FC.mediaSourceFrom(blob, "chat_refresh_populated_blob");
   try {
-    const downloaded = await FC.tryDownloadMedia(message, env);
+    const downloaded = await FC.tryDownloadMedia(activeMessage, env, {maxBytes});
     if (downloaded) return downloaded;
   } catch (error) {
-    failures.push(FC.mediaErrorText(error));
+    failures.push(`download_media_refresh: ${FC.mediaErrorText(error)}`);
   }
-  blob = FC.blobFromMessage(message);
+  blob = FC.blobFromMessage(activeMessage) || FC.cachedMediaBlob(activeMessage, env);
   if (blob) return FC.mediaSourceFrom(blob, "downloadMedia_populated_blob");
-  try {
-    blob = await FC.legacyDecryptMedia(message, env);
-  } catch (error) {
-    failures.push(FC.mediaErrorText(error));
+
+  const refreshedUrl = FC.mediaUrl(activeMessage, env);
+  if (refreshedUrl) {
+    try {
+      blob = await FC.legacyDecryptMedia(activeMessage, env, {url: refreshedUrl, maxBytes});
+      const source = FC.mediaSourceFrom(blob, FC.mediaUrlIsExpired(refreshedUrl)
+        ? "retry_expired_url_aes_cbc_buffered"
+        : "refreshed_url_aes_cbc_buffered");
+      if (source) source.legacyBuffered = true;
+      if (source) return source;
+    } catch (error) {
+      failures.push(`refreshed_url: ${FC.mediaErrorText(error)}`);
+    }
+  } else {
+    failures.push("refreshed_url: media_url_unavailable");
   }
-  if (!blob || blob.size <= 0) {
-    throw new Error(failures.length > 0 ? failures.join("; ") : "media_source_unavailable");
-  }
-  const source = FC.mediaSourceFrom(blob, "legacy_aes_cbc_buffered");
-  if (source) source.legacyBuffered = true;
-  return source;
+  throw new Error(failures.length > 0 ? failures.join("; ") : "media_source_unavailable");
 };
 
 FC.previewMedia = async function previewMedia(message) {

@@ -1,7 +1,0 @@
-{
-    "schemaVersion":  "wafc-adapter-manifest/1",
-    "adapterId":  "wa-private-collections-v2",
-    "version":  "2.5.3",
-    "bridgeProtocol":  "wafc-bridge/2",
-    "sha256":  "sha256:56870612691965160082a3c2bab30d460f0da31cb5061923d8011fd0b1a0fdd9"
-}

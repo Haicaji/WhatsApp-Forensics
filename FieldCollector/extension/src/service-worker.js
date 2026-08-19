@@ -32,6 +32,18 @@ function exactWhatsAppUrl(value) {
   } catch { return false; }
 }
 
+function validPolicy(value) {
+  const keys = [
+    "includeStatuses", "includeCalls", "includeChannels", "includeChatMedia",
+    "includeChannelMedia", "includeAvatars", "channelDays", "maxMediaBytes"
+  ];
+  if (!exactKeys(value, keys)) return false;
+  if (!["includeStatuses", "includeCalls", "includeChannels", "includeChatMedia", "includeChannelMedia", "includeAvatars"]
+    .every(key => typeof value[key] === "boolean")) return false;
+  return Number.isInteger(value.channelDays) && value.channelDays >= 1 && value.channelDays <= 3650
+    && Number.isSafeInteger(value.maxMediaBytes) && value.maxMediaBytes >= 0;
+}
+
 function browserIdentity() {
   const edge = /Edg\/([0-9.]+)/.exec(navigator.userAgent);
   if (edge) return {browserFamily: "edge", browserVersion: edge[1]};
@@ -51,7 +63,10 @@ function validCallFunction(params) {
   if (!Array.isArray(params.arguments) || params.arguments.length > 1 || params.awaitPromise !== true || params.returnByValue !== true || params.userGesture !== false) return false;
   if (params.functionDeclaration === DISPATCH_FUNCTION) {
     const command = params.arguments[0]?.value;
-    return params.arguments.length === 1 && command && ["probe", "start_full"].includes(command.command) && exactKeys(command, ["command"]);
+    if (params.arguments.length !== 1 || !command) return false;
+    if (command.command === "probe") return exactKeys(command, ["command"]);
+    return command.command === "start_full" && exactKeys(command, ["command", "policy"])
+      && validPolicy(command.policy);
   }
   if (params.functionDeclaration === ACK_FUNCTION) {
     return params.arguments.length === 1 && typeof params.arguments[0]?.value === "string" && REQUEST_ID_PATTERN.test(params.arguments[0].value);

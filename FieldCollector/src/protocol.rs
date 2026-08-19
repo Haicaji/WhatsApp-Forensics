@@ -12,6 +12,38 @@ pub const PAIRING_PORT: u16 = 17_654;
 /// Maximum JSON WebSocket message accepted from the extension.
 pub const MAX_WIRE_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
+/// User-selected, bounded extraction policy passed to the fixed page controller.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)]
+pub struct AcquisitionPolicy {
+    pub include_statuses: bool,
+    pub include_calls: bool,
+    pub include_channels: bool,
+    pub include_chat_media: bool,
+    pub include_channel_media: bool,
+    pub include_avatars: bool,
+    /// Inclusive rolling channel window in days.
+    pub channel_days: u32,
+    /// Zero means unlimited; otherwise the complete original/preview must fit.
+    pub max_media_bytes: u64,
+}
+
+impl Default for AcquisitionPolicy {
+    fn default() -> Self {
+        Self {
+            include_statuses: true,
+            include_calls: true,
+            include_channels: true,
+            include_chat_media: true,
+            include_channel_media: true,
+            include_avatars: true,
+            channel_days: 15,
+            max_media_bytes: 0,
+        }
+    }
+}
+
 /// One pull-based frame returned by the MAIN-world controller.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,7 +119,20 @@ pub fn cdp_value(response: &Value) -> anyhow::Result<Value> {
 mod tests {
     use serde_json::json;
 
-    use super::{EXTRACTOR_PROTOCOL, ExtractorFrame, cdp_value};
+    use super::{AcquisitionPolicy, EXTRACTOR_PROTOCOL, ExtractorFrame, cdp_value};
+
+    #[test]
+    fn default_policy_serializes_with_bounded_camel_case_fields() {
+        let value = serde_json::to_value(AcquisitionPolicy::default()).unwrap_or_default();
+        assert_eq!(value["includeStatuses"], true);
+        assert_eq!(value["includeCalls"], true);
+        assert_eq!(value["includeChannels"], true);
+        assert_eq!(value["includeChatMedia"], true);
+        assert_eq!(value["includeChannelMedia"], true);
+        assert_eq!(value["includeAvatars"], true);
+        assert_eq!(value["channelDays"], 15);
+        assert_eq!(value["maxMediaBytes"], 0);
+    }
 
     #[test]
     fn validates_exact_frame_sequence() {
