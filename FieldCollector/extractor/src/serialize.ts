@@ -505,7 +505,12 @@ FC.messageRecord = function messageRecord(model, fallbackChatId = null) {
     && /^[A-Za-z0-9+/=\s]+$/.test(body);
   return {
     id,
-    chatId: FC.chatId(model, fallbackChatId),
+    // The caller already knows which chat collection owns this message.  In
+    // WhatsApp's current models an outgoing message can expose the local
+    // account through `from` before it exposes the remote chat through `to`.
+    // Treating those fields as the owning chat writes the account id into
+    // messages.csv, so prefer the parent chat id whenever it is available.
+    chatId: FC.idString(fallbackChatId) || FC.chatId(model),
     senderId: FC.idString(FC.first(model, ["author", "from", "senderObj"])),
     recipientId: FC.idString(FC.first(model, ["to", "recipient"])),
     fromMe: Boolean(FC.first(key, ["fromMe"]) || FC.read(model, "fromMe")),

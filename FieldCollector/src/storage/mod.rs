@@ -13,6 +13,8 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::portable::PortableTask;
+
 use crate::protocol::ExtractorFrame;
 
 const CHAT_DATASETS: [&str; 9] = [
@@ -402,6 +404,9 @@ pub struct SessionWriter {
     staging_dir: PathBuf,
     final_dir: PathBuf,
     started_at: String,
+    evidence_name: String,
+    session_id: String,
+    portable_task: Option<PortableTask>,
     capabilities: Option<Value>,
     root_datasets: BTreeMap<String, Vec<Value>>,
     current_chat: Option<ChatWriter>,
@@ -414,13 +419,28 @@ pub struct SessionWriter {
 }
 
 impl SessionWriter {
-    /// Create a new `.partial` session below the selected export root.
-    pub fn new(output_root: &Path) -> Result<Self> {
+    /// Create a session associated with the operator-entered evidence item name.
+    #[cfg(test)]
+    pub fn new_with_evidence_item(output_root: &Path, evidence_name: &str) -> Result<Self> {
+        Self::new_with_context(output_root, evidence_name, None)
+    }
+
+    /// Create a session, optionally linked to an Analysis Workstation task.
+    pub fn new_with_context(
+        output_root: &Path,
+        evidence_name: &str,
+        portable_task: Option<&PortableTask>,
+    ) -> Result<Self> {
+        let evidence_name = evidence_name.trim();
+        anyhow::ensure!(
+            !evidence_name.is_empty(),
+            "evidence item name cannot be empty"
+        );
         fs::create_dir_all(output_root)
             .with_context(|| format!("cannot create output root {}", output_root.display()))?;
         let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ");
-        let id = Uuid::new_v4().simple().to_string();
-        let short = id.get(..8).unwrap_or(id.as_str());
+        let session_id = Uuid::new_v4().to_string();
+        let short = session_id.get(..8).unwrap_or(session_id.as_str());
         let base_name = format!("{timestamp}_{short}");
         let staging_dir = output_root.join(format!("{base_name}.partial"));
         let final_dir = output_root.join(base_name);
@@ -435,6 +455,9 @@ impl SessionWriter {
             staging_dir,
             final_dir,
             started_at,
+            evidence_name: evidence_name.to_owned(),
+            session_id,
+            portable_task: portable_task.cloned(),
             capabilities: None,
             root_datasets: BTreeMap::new(),
             current_chat: None,
@@ -504,11 +527,12 @@ impl SessionWriter {
             "extraction_logs",
             &self.log,
         )?;
-        let manifest = json!({
+        let mut manifest = json!({
             "schemaVersion": "field-collector-session/5",
             "status": status,
             "startedAt": self.started_at,
             "finishedAt": Utc::now().to_rfc3339(),
+            "evidenceItem": {"name": &self.evidence_name},
             "chatCount": self.chat_count,
             "capabilitiesPath": "capabilities.json",
             "summary": summary.clone(),
@@ -523,6 +547,18 @@ impl SessionWriter {
                 "tabularCsv": ["contacts", "participants", "messages", "receipts", "extraction_logs"]
             }
         });
+        if let Some(task) = &self.portable_task {
+            manifest["schemaVersion"] = json!("field-collector-session/6");
+            manifest["sessionId"] = json!(&self.session_id);
+            manifest["task"] = json!({
+                "schemaVersion": &task.schema_version,
+                "taskId": &task.task_id,
+                "caseId": &task.case_id,
+                "caseName": &task.case_name,
+                "taskName": &task.task_name,
+                "createdAtUtc": &task.created_at_utc
+            });
+        }
         write_json(&self.staging_dir.join("manifest.json"), &manifest)?;
         if status == "complete" {
             fs::rename(&self.staging_dir, &self.final_dir).with_context(|| {
@@ -1220,6 +1256,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{SessionWriter, chat_directory_name, sanitize_component, write_csv};
+    use crate::portable::{PORTABLE_TASK_SCHEMA, PortableTask};
     use crate::protocol::{EXTRACTOR_PROTOCOL, ExtractorFrame};
 
     fn frame(sequence: u64, kind: &str, payload: serde_json::Value) -> ExtractorFrame {
@@ -1243,6 +1280,51 @@ mod tests {
             chat_directory_name(12_345_678_901, "chat@g.us"),
             "12345678901_chat@g.us"
         );
+    }
+
+    #[test]
+    fn evidence_item_name_is_required_and_saved_in_the_manifest() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "field-collector-evidence-name-test-{}",
+            Uuid::new_v4()
+        ));
+        assert!(SessionWriter::new_with_evidence_item(&root, "   ").is_err());
+
+        let writer = SessionWriter::new_with_evidence_item(&root, "  张三手机  ")?;
+        let path = writer.finish("complete", &json!({}))?;
+        let manifest: Value = serde_json::from_slice(&fs::read(path.join("manifest.json"))?)?;
+        assert_eq!(manifest["evidenceItem"]["name"], "张三手机");
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn portable_session_uses_v6_and_embeds_task_reference() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "field-collector-portable-manifest-test-{}",
+            Uuid::new_v4()
+        ));
+        let task = PortableTask {
+            schema_version: PORTABLE_TASK_SCHEMA.to_owned(),
+            task_id: Uuid::new_v4().to_string(),
+            case_id: Uuid::new_v4().to_string(),
+            case_name: "测试案件".to_owned(),
+            task_name: "一号采集任务".to_owned(),
+            created_at_utc: "2026-08-20T01:02:03Z".to_owned(),
+            result_directory: "results".to_owned(),
+        };
+
+        let writer = SessionWriter::new_with_context(&root, "测试检材", Some(&task))?;
+        let path = writer.finish("complete", &json!({}))?;
+        let manifest: Value = serde_json::from_slice(&fs::read(path.join("manifest.json"))?)?;
+        assert_eq!(manifest["schemaVersion"], "field-collector-session/6");
+        assert_eq!(manifest["task"]["taskId"], task.task_id);
+        assert_eq!(manifest["task"]["caseId"], task.case_id);
+        assert!(Uuid::parse_str(manifest["sessionId"].as_str().unwrap_or_default()).is_ok());
+
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]
@@ -1295,7 +1377,7 @@ mod tests {
             "field-collector-media-dedup-test-{}",
             Uuid::new_v4()
         ));
-        let mut writer = SessionWriter::new(&root)?;
+        let mut writer = SessionWriter::new_with_evidence_item(&root, "测试检材")?;
         writer.handle_frame(&frame(0, "capabilities", json!({"datasets": {}})))?;
         let payload = "c2FtZS1hdHRhY2htZW50";
         let mut sequence = 1;
@@ -1425,7 +1507,7 @@ mod tests {
     #[test]
     fn writes_valid_json_csv_session_without_database() -> anyhow::Result<()> {
         let root = std::env::temp_dir().join(format!("field-collector-test-{}", Uuid::new_v4()));
-        let mut writer = SessionWriter::new(&root)?;
+        let mut writer = SessionWriter::new_with_evidence_item(&root, "测试检材")?;
         writer.handle_frame(&frame(0, "capabilities", json!({"datasets": {}})))?;
         writer.handle_frame(&frame(
             1,
@@ -1519,7 +1601,7 @@ mod tests {
     fn cancelled_session_keeps_valid_partial_results() -> anyhow::Result<()> {
         let root =
             std::env::temp_dir().join(format!("field-collector-cancel-test-{}", Uuid::new_v4()));
-        let mut writer = SessionWriter::new(&root)?;
+        let mut writer = SessionWriter::new_with_evidence_item(&root, "测试检材")?;
         writer.handle_frame(&frame(
             0,
             "capabilities",
@@ -1565,7 +1647,7 @@ mod tests {
             "field-collector-global-datasets-test-{}",
             Uuid::new_v4()
         ));
-        let mut writer = SessionWriter::new(&root)?;
+        let mut writer = SessionWriter::new_with_evidence_item(&root, "测试检材")?;
         writer.handle_frame(&frame(
             0,
             "capabilities",
@@ -1616,7 +1698,7 @@ mod tests {
             std::env::temp_dir().join(format!("field-collector-fixture-test-{}", Uuid::new_v4()));
         let frames: Vec<ExtractorFrame> =
             serde_json::from_str(include_str!("../../tests/fixtures/protocol-frames.json"))?;
-        let mut writer = SessionWriter::new(&root)?;
+        let mut writer = SessionWriter::new_with_evidence_item(&root, "测试检材")?;
         let mut terminal = None;
         for (index, frame) in frames.iter().enumerate() {
             frame.validate(u64::try_from(index)?)?;

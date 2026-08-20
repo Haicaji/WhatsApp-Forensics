@@ -8,6 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 
+use crate::portable::PortableTask;
 use crate::protocol::{AcquisitionEvent, AcquisitionPolicy, ExtractorFrame, cdp_value};
 use crate::storage::SessionWriter;
 use crate::transport::GatewayHandle;
@@ -23,6 +24,11 @@ struct UiFrameState {
     media_name: Option<String>,
     media_bytes: u64,
     last_media_report: u64,
+}
+
+struct SessionContext<'a> {
+    evidence_name: &'a str,
+    portable_task: Option<&'a PortableTask>,
 }
 
 impl UiFrameState {
@@ -124,6 +130,8 @@ pub fn run_acquisition(
     cancellation: &Arc<AtomicBool>,
     events: &mpsc::Sender<AcquisitionEvent>,
     policy: &AcquisitionPolicy,
+    evidence_name: &str,
+    portable_task: Option<&PortableTask>,
 ) -> Result<PathBuf> {
     let _ = events.send(AcquisitionEvent::Status("正在等待扩展连接".to_owned()));
     gateway.wait_paired(Duration::from_secs(5))?;
@@ -153,6 +161,10 @@ pub fn run_acquisition(
         .ok_or_else(|| anyhow!("页面提取器没有返回控制器对象"))?
         .to_owned();
 
+    let session_context = SessionContext {
+        evidence_name,
+        portable_task,
+    };
     let result = run_controller(
         gateway,
         output_root,
@@ -160,6 +172,7 @@ pub fn run_acquisition(
         events,
         &object_id,
         policy,
+        &session_context,
     );
     let _ = gateway.request(
         "Runtime.releaseObject",
@@ -176,6 +189,7 @@ fn run_controller(
     events: &mpsc::Sender<AcquisitionEvent>,
     object_id: &str,
     policy: &AcquisitionPolicy,
+    session_context: &SessionContext<'_>,
 ) -> Result<PathBuf> {
     let probe = call_controller(
         gateway,
@@ -193,7 +207,11 @@ fn run_controller(
         "能力探测完成，{unavailable} 个类别当前不可用；结果会明确记录"
     )));
 
-    let mut writer = SessionWriter::new(output_root)?;
+    let mut writer = SessionWriter::new_with_context(
+        output_root,
+        session_context.evidence_name,
+        session_context.portable_task,
+    )?;
     let start = call_controller(
         gateway,
         object_id,

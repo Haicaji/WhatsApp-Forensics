@@ -8,6 +8,7 @@ use std::sync::{Arc, mpsc};
 use eframe::egui::{self, Color32, RichText};
 
 use crate::acquisition::run_acquisition;
+use crate::portable::{LaunchConfiguration, PortableTask};
 use crate::protocol::{AcquisitionEvent, AcquisitionPolicy};
 use crate::transport::{GatewayEvent, GatewayHandle, start_gateway};
 use crate::viewer::ViewerState;
@@ -27,8 +28,12 @@ enum Page {
 /// Complete egui application state.
 pub struct CollectorApp {
     page: Page,
+    evidence_name: String,
     output_root: String,
     extension_directory: PathBuf,
+    portable_mode: bool,
+    portable_task: Option<PortableTask>,
+    startup_error: Option<String>,
     pairing_code: String,
     gateway: Option<GatewayHandle>,
     gateway_events: Option<mpsc::Receiver<GatewayEvent>>,
@@ -46,17 +51,21 @@ pub struct CollectorApp {
 }
 
 impl CollectorApp {
-    pub fn new(context: &egui::Context) -> Self {
+    pub fn new(context: &egui::Context, launch: LaunchConfiguration) -> Self {
         install_cjk_font(context);
         install_dark_theme(context);
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let output_root = manifest_dir.join("exports").to_string_lossy().into_owned();
-        let extension_directory = manifest_dir.join("extension/dist");
+        let output_root = launch.output_root.to_string_lossy().into_owned();
+        let extension_directory = launch.extension_directory;
+        let startup_error = launch.startup_error;
         let pairing_code = generate_pairing_code();
         let mut app = Self {
             page: Page::Collect,
+            evidence_name: String::new(),
             output_root,
             extension_directory,
+            portable_mode: launch.portable_mode,
+            portable_task: launch.task,
+            startup_error: startup_error.clone(),
             pairing_code,
             gateway: None,
             gateway_events: None,
@@ -66,17 +75,26 @@ impl CollectorApp {
             cancellation: Arc::new(AtomicBool::new(false)),
             running: false,
             status: "正在启动本机扩展连接".to_owned(),
-            error: None,
+            error: startup_error,
             latest_path: None,
             viewer: ViewerState::default(),
             policy: AcquisitionPolicy::default(),
             max_media_mib: 0,
         };
-        app.restart_gateway();
+        if app.startup_error.is_none() {
+            app.restart_gateway();
+        } else {
+            "便携任务配置无效，采集已禁用".clone_into(&mut app.status);
+        }
         app
     }
 
     fn restart_gateway(&mut self) {
+        if let Some(message) = &self.startup_error {
+            self.error = Some(message.clone());
+            "便携任务配置无效，采集已禁用".clone_into(&mut self.status);
+            return;
+        }
         if let Some(gateway) = &self.gateway {
             gateway.shutdown();
         }
@@ -154,6 +172,15 @@ impl CollectorApp {
     }
 
     fn start_acquisition(&mut self) {
+        if let Some(message) = &self.startup_error {
+            self.error = Some(message.clone());
+            return;
+        }
+        let evidence_name = self.evidence_name.trim().to_owned();
+        if evidence_name.is_empty() {
+            self.error = Some("请先填写检材名称".to_owned());
+            return;
+        }
         let Some(gateway) = self.gateway.clone() else {
             self.error = Some("扩展连接尚未启动".to_owned());
             return;
@@ -163,6 +190,7 @@ impl CollectorApp {
         let cancellation = Arc::clone(&self.cancellation);
         self.policy.max_media_bytes = self.max_media_mib.saturating_mul(1024 * 1024);
         let policy = self.policy.clone();
+        let portable_task = self.portable_task.clone();
         let (events_tx, events_rx) = mpsc::channel();
         self.worker_events = Some(events_rx);
         self.running = true;
@@ -171,7 +199,15 @@ impl CollectorApp {
         let spawn_result = std::thread::Builder::new()
             .name("field-collector-acquisition".to_owned())
             .spawn(move || {
-                match run_acquisition(&gateway, &output_root, &cancellation, &events_tx, &policy) {
+                match run_acquisition(
+                    &gateway,
+                    &output_root,
+                    &cancellation,
+                    &events_tx,
+                    &policy,
+                    &evidence_name,
+                    portable_task.as_ref(),
+                ) {
                     Ok(path) => {
                         let _ = events_tx.send(AcquisitionEvent::Complete(path));
                     }
@@ -189,8 +225,44 @@ impl CollectorApp {
 
     #[allow(clippy::too_many_lines)]
     fn collect_ui(&mut self, ui: &mut egui::Ui) {
+        if self.portable_mode {
+            ui.group(|ui| {
+                ui.heading("便携任务");
+                if let Some(task) = &self.portable_task {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("案件").strong());
+                        ui.label(&task.case_name);
+                        ui.separator();
+                        ui.label(RichText::new("任务").strong());
+                        ui.label(&task.task_name);
+                    });
+                    ui.weak(format!("任务编号：{}", task.task_id));
+                    ui.label("结果将固定写入任务 U 盘的 results 目录。");
+                } else {
+                    ui.colored_label(DANGER, "task.json 无效，当前不能开始采集。");
+                }
+            });
+            ui.add_space(8.0);
+        }
         ui.group(|ui| {
-            ui.heading("1. 加载浏览器扩展");
+            ui.heading("1. 检材信息");
+            ui.label("填写当前提取检材的信息。当前仅要求填写检材名称。");
+            ui.horizontal(|ui| {
+                ui.label("检材名称");
+                ui.add_enabled(
+                    !self.running,
+                    egui::TextEdit::singleline(&mut self.evidence_name)
+                        .hint_text("必填")
+                        .desired_width(420.0),
+                );
+                if self.evidence_name.trim().is_empty() {
+                    ui.colored_label(DANGER, "必填");
+                }
+            });
+        });
+        ui.add_space(8.0);
+        ui.group(|ui| {
+            ui.heading("2. 加载浏览器扩展");
             ui.label("在 Chrome 扩展管理页启用开发者模式，加载下面的未打包扩展目录。");
             ui.horizontal(|ui| {
                 ui.monospace(self.extension_directory.to_string_lossy());
@@ -201,7 +273,7 @@ impl CollectorApp {
         });
         ui.add_space(8.0);
         ui.group(|ui| {
-            ui.heading("2. 连接已登录的 WhatsApp Web");
+            ui.heading("3. 连接已登录的 WhatsApp Web");
             ui.label("打开并选中 WhatsApp Web 标签页，点击扩展并输入一次性配对码：");
             ui.horizontal(|ui| {
                 ui.label(
@@ -228,7 +300,7 @@ impl CollectorApp {
         });
         ui.add_space(8.0);
         ui.group(|ui| {
-            ui.heading("3. 设置采集策略");
+            ui.heading("4. 设置采集策略");
             ui.horizontal_wrapped(|ui| {
                 ui.add_enabled(
                     !self.running,
@@ -276,11 +348,11 @@ impl CollectorApp {
         });
         ui.add_space(8.0);
         ui.group(|ui| {
-            ui.heading("4. 提取并保存");
+            ui.heading("5. 提取并保存");
             ui.horizontal(|ui| {
                 ui.label("输出根目录");
                 ui.add_enabled(
-                    !self.running,
+                    !self.running && !self.portable_mode,
                     egui::TextEdit::singleline(&mut self.output_root).desired_width(620.0),
                 );
                 if ui.button("打开").clicked() {
@@ -289,7 +361,10 @@ impl CollectorApp {
             });
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(self.paired && !self.running, egui::Button::new("开始提取"))
+                    .add_enabled(
+                        self.paired && !self.running && !self.evidence_name.trim().is_empty(),
+                        egui::Button::new("开始提取"),
+                    )
                     .clicked()
                 {
                     self.start_acquisition();

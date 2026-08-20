@@ -54,7 +54,10 @@ FC.detectModules = function detectModules() {
     presence: FC.safeRequire(["WAWebPresenceCollection"]),
     labels: FC.safeRequire(["WAWebLabelCollection"]),
     labelItems: FC.safeRequire(["WAWebLabelItemCollection"]),
-    pins: FC.safeRequire(["WAWebPinCollection", "WAWebMsgPinCollection"]),
+    pins: FC.safeRequire([
+      "WAWebPinInChatCollection", "WAWebPinCollection", "WAWebMsgPinCollection",
+      "WAWebPinnedMessageCollection"
+    ]),
     chatLists: FC.safeRequire(["WAWebChatListCollection"]),
     cryptoHkdf: FC.safeRequire(["WACryptoHkdf", "WAWebCryptoHkdf"]),
     mediaBlobCache: FC.safeRequire(["WAWebMediaInMemoryBlobCache"])
@@ -83,12 +86,17 @@ FC.detectModules = function detectModules() {
       "NewsletterMetadataCollection", "WAWebNewsletterMetadataCollection"
     ]),
     channelHistory: FC.moduleValue(found.channelHistory, ["NewsletterLoadMessages", "NewsletterLoadMessagesJob"]),
-    groupMetadata: FC.moduleValue(found.groupMetadata, ["GroupMetadataCollection"]),
+    groupMetadata: FC.moduleValue(found.groupMetadata, [
+      "GroupMetadataCollectionImpl", "GroupMetadataCollection"
+    ]),
     communities: FC.moduleValue(found.communities, ["CommunityCollection", "CommunityMetadataCollection"]),
     presence: FC.moduleValue(found.presence, ["PresenceCollection"]),
     labels: FC.moduleValue(found.labels, ["LabelCollection"]),
     labelItems: FC.moduleValue(found.labelItems, ["LabelItemCollection"]),
-    pins: FC.moduleValue(found.pins, ["PinCollection", "MsgPinCollection"]),
+    pins: FC.moduleValue(found.pins, [
+      "PinInChatCollectionImpl", "PinInChatCollection", "PinCollection", "MsgPinCollection",
+      "PinnedMessageCollection"
+    ]),
     chatLists: FC.moduleValue(found.chatLists, ["ChatListCollection"]),
     cryptoHkdf: FC.moduleValue(found.cryptoHkdf, ["CryptoHkdf", "Hkdf", "HKDF"]),
     mediaBlobCache: FC.moduleValue(found.mediaBlobCache, ["InMemoryMediaBlobCache"])
@@ -118,13 +126,19 @@ FC.detectModules = function detectModules() {
       [found.channels?.name, found.channelMetadata?.name].filter(Boolean).join("+") || null,
       "newsletter_collection_unreadable"),
     channel_events: supported(FC.collectionReadable(env.channels), found.channels?.name, "newsletter_collection_unreadable"),
-    communities: supported(Boolean(env.communities), found.communities?.name),
-    community_relations: supported(Boolean(env.communities), found.communities?.name),
+    communities: supported(
+      FC.collectionReadable(env.communities) || Boolean(env.groupMetadata && env.chatCollection),
+      found.communities?.name || [found.groupMetadata?.name, found.chats?.name].filter(Boolean).join("+")
+    ),
+    community_relations: supported(
+      FC.collectionReadable(env.communities) || Boolean(env.groupMetadata && env.chatCollection),
+      found.communities?.name || [found.groupMetadata?.name, found.chats?.name].filter(Boolean).join("+")
+    ),
     presence_snapshots: supported(Boolean(env.presence), found.presence?.name),
     media_albums: supported(Boolean(env.chatCollection), found.chats?.name),
     labels: supported(Boolean(env.labels), found.labels?.name),
     label_relations: supported(Boolean(env.labelItems), found.labelItems?.name),
-    pins: supported(Boolean(env.pins), found.pins?.name)
+    pins: supported(FC.collectionReadable(env.pins), found.pins?.name, "pin_collection_unreadable")
   };
   return {
     env,

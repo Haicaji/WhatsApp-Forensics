@@ -249,9 +249,10 @@ FC.createController = function createController() {
         statuses: statusResult.records,
         calls: callResult.records,
         channels: channelResult.records,
-        channel_events: channelResult.events
+        channel_events: channelResult.events,
+        pins: []
       });
-      for (const dataset of ["chat_lists", "statuses", "calls", "channels", "channel_events", "communities", "community_relations", "presence_snapshots", "labels", "label_relations"]) {
+      for (const dataset of ["chat_lists", "statuses", "calls", "channels", "channel_events", "presence_snapshots", "labels", "label_relations"]) {
         await emitDataset(dataset, globals[dataset]);
       }
 
@@ -265,6 +266,8 @@ FC.createController = function createController() {
 
       const queue = [];
       const byId = new Map();
+      const communityMessageContexts = [];
+      const observedPins = new Map(FC.pinRecords(env).map(record => [record.id, record]));
       FC.absorbChats(queue, byId, env);
       for (let chatIndex = 0; chatIndex < queue.length && !state.cancelled; chatIndex += 1) {
         FC.absorbChats(queue, byId, env);
@@ -275,6 +278,8 @@ FC.createController = function createController() {
         const chatRecord = FC.chatRecord(FC.liveChatModels(chat, env).at(-1) || chat, identities.index);
         await emit("chat_begin", {index: chatIndex + 1, chatId, chat: chatRecord});
         const datasets = FC.chatDerivedDatasets(chat, synchronized.messages, env, identities.index);
+        communityMessageContexts.push({chatId, messages: synchronized.messages});
+        for (const pin of datasets.pins) observedPins.set(pin.id, pin);
         rememberAvatarId(chatId);
         for (const participant of datasets.participants) rememberAvatarId(participant.id);
         for (const message of datasets.messages) {
@@ -315,6 +320,26 @@ FC.createController = function createController() {
         summary.chats += 1;
         FC.absorbChats(queue, byId, env);
       }
+
+      const communityResult = FC.collectCommunities(env, communityMessageContexts);
+      await emitDataset("communities", communityResult.records);
+      await emitDataset("community_relations", communityResult.relations);
+      await emitDataset("pins", Array.from(observedPins.values()));
+      applyCapabilityResult("communities", communityResult);
+      applyCapabilityResult("community_relations", {
+        ...communityResult,
+        records: communityResult.relations
+      });
+      const materializedPinCollection = FC.collectionReadable(env.pins);
+      detected.capabilities.datasets.pins = {
+        status: materializedPinCollection || observedPins.size > 0 ? "supported" : "unavailable",
+        source: materializedPinCollection ? detected.capabilities.datasets.pins?.source :
+          observedPins.size > 0 ? "WAWebChatCollection" : null,
+        reason: materializedPinCollection ? null : observedPins.size > 0 ?
+          "derived_from_chat_messages" : "pin_collection_unavailable_and_no_pin_events_observed",
+        recordCount: observedPins.size
+      };
+      await emit("capabilities", detected.capabilities);
 
       const avatarTasks = policy.includeAvatars ? FC.avatarTasks(env, relevantAvatarIds) : [];
       for (let avatarIndex = 0; avatarIndex < avatarTasks.length && !state.cancelled; avatarIndex += 1) {

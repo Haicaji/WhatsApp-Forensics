@@ -15,6 +15,242 @@ FC.recordsFromNestedCollection = function recordsFromNestedCollection(dataset, p
   return records;
 };
 
+FC.groupMetadataForChat = function groupMetadataForChat(chat, env) {
+  const chatId = FC.idString(FC.first(chat, ["id", "wid"]));
+  const embedded = FC.first(chat, ["groupMetadata", "metadata"]);
+  if (embedded) return embedded;
+  try {
+    if (typeof env.groupMetadata?.get === "function") {
+      const exact = env.groupMetadata.get(FC.first(chat, ["id", "wid"])) || env.groupMetadata.get(chatId);
+      if (exact) return exact;
+    }
+  } catch {}
+  return FC.collectionValues(env.groupMetadata).find(item =>
+    FC.idString(FC.first(item, ["id", "wid", "jid"])) === chatId
+  ) || null;
+};
+
+FC.groupIdsFrom = function groupIdsFrom(value) {
+  const output = [];
+  const remember = candidate => {
+    const id = FC.idString(FC.first(candidate, [
+      "id", "wid", "jid", "groupId", "subgroupId", "communityId"
+    ])) || FC.idString(candidate);
+    if (id && /@g\.us$/i.test(id) && !output.includes(id)) output.push(id);
+  };
+  FC.collectionValues(value).forEach(remember);
+  if (output.length === 0) remember(value);
+  return output;
+};
+
+FC.collectCommunities = function collectCommunities(env, chatMessageContexts = []) {
+  const records = new Map();
+  const relations = new Map();
+  const sources = new Set();
+  const chats = FC.collectionValues(env.chatCollection);
+  const chatsById = new Map(chats.map(chat => [
+    FC.idString(FC.first(chat, ["id", "wid"])), chat
+  ]).filter(([id]) => id));
+  const rememberCommunity = (id, title, source, rawSource = null) => {
+    if (!id) return;
+    const chat = chatsById.get(id);
+    const metadata = chat ? FC.groupMetadataForChat(chat, env) : null;
+    const existing = records.get(id);
+    const record = {
+      id,
+      title: title || existing?.title || FC.first(chat, ["formattedTitle", "name", "title"]) || id,
+      description: FC.first(metadata, ["description", "desc", "about"]) ?? existing?.description ?? null,
+      createdAt: FC.modelTimestampValue(metadata || chat || rawSource, [
+        "creationTime", "createdAtTs", "createdAt", "t", "timestamp"
+      ]),
+      source,
+      raw: FC.rawSnapshot(rawSource || metadata || chat, {omitKeys: FC.REPEATED_COLLECTION_KEYS})
+    };
+    records.set(id, {...existing, ...record, title: record.title || existing?.title});
+    if (source) sources.add(source);
+  };
+  const rememberRelation = (relationKind, fromId, toId, source, rawSource = null) => {
+    if (!fromId || !toId || fromId === toId) return;
+    const id = `${fromId}:${relationKind}:${toId}`;
+    if (!relations.has(id)) {
+      relations.set(id, {
+        id, relationKind, fromId, toId, source,
+        raw: FC.rawSnapshot(rawSource, {omitKeys: FC.REPEATED_COLLECTION_KEYS})
+      });
+    }
+    if (source) sources.add(source);
+  };
+
+  for (const model of FC.collectionValues(env.communities)) {
+    const id = FC.idString(FC.first(model, ["id", "wid", "jid"]));
+    rememberCommunity(
+      id,
+      FC.first(model, ["formattedTitle", "name", "title", "subject"]),
+      "WAWebCommunityCollection",
+      model
+    );
+  }
+
+  for (const chat of chats) {
+    const chatId = FC.idString(FC.first(chat, ["id", "wid"]));
+    if (!chatId || !/@g\.us$/i.test(chatId)) continue;
+    const metadata = FC.groupMetadataForChat(chat, env);
+    const isCommunity = Boolean(FC.first(metadata, [
+      "isParentGroup", "isCommunity", "isCommunityParentGroup"
+    ]) || FC.first(chat, ["isCommunity", "isParentGroup"]));
+    if (isCommunity) {
+      rememberCommunity(
+        chatId,
+        FC.first(chat, ["formattedTitle", "name", "title", "subject"]),
+        "WAWebGroupMetadataCollection",
+        metadata || chat
+      );
+    }
+    const parentId = FC.idString(FC.first(metadata, [
+      "parentGroup", "parentGroupId", "linkedParent", "linkedParentGroup", "community", "communityId"
+    ]));
+    if (parentId) {
+      rememberCommunity(parentId, null, "WAWebGroupMetadataCollection", metadata);
+      rememberRelation("community_parent", chatId, parentId, "WAWebGroupMetadataCollection", metadata);
+    }
+    const defaultId = FC.idString(FC.first(metadata, [
+      "defaultSubgroup", "defaultSubgroupId", "announcementGroup", "announcementGroupId"
+    ]));
+    if (defaultId) {
+      rememberCommunity(chatId, null, "WAWebGroupMetadataCollection", metadata);
+      rememberRelation(
+        "community_announcement_group", chatId, defaultId,
+        "WAWebGroupMetadataCollection", metadata
+      );
+    }
+    for (const key of ["joinedSubgroups", "subgroups", "childGroups", "communitySubgroups", "linkedGroups"]) {
+      for (const childId of FC.groupIdsFrom(FC.read(metadata, key))) {
+        rememberCommunity(chatId, null, "WAWebGroupMetadataCollection", metadata);
+        rememberRelation("community_child_group", chatId, childId, "WAWebGroupMetadataCollection", metadata);
+      }
+    }
+  }
+
+  const announcementParents = new Map();
+  const eventEntries = [];
+  for (const context of chatMessageContexts) {
+    const chatId = FC.idString(context?.chatId);
+    for (const message of context?.messages || []) {
+      const subtype = String(FC.first(message, ["subtype", "eventType"]) || "").toLowerCase();
+      if (!subtype) continue;
+      const groupIds = FC.groupIdsFrom(FC.first(message, ["templateParams", "params", "groupIds"]));
+      eventEntries.push({chatId, message, subtype, groupIds});
+      if (subtype === "community_create" && groupIds[0]) {
+        const communityId = groupIds[0];
+        const title = FC.textValue(FC.first(message, ["body", "subject", "name", "title"]));
+        announcementParents.set(chatId, communityId);
+        rememberCommunity(communityId, title, "WAWebChatCollection.community_events", message);
+        rememberRelation(
+          "community_announcement_group", communityId, chatId,
+          "WAWebChatCollection.community_events", message
+        );
+      }
+    }
+  }
+  for (const {chatId, message, subtype, groupIds} of eventEntries) {
+    if (subtype === "empty_subgroup_create" && groupIds[0]) {
+      rememberCommunity(groupIds[0], null, "WAWebChatCollection.community_events", message);
+      rememberRelation(
+        "community_child_group", groupIds[0], chatId,
+        "WAWebChatCollection.community_events", message
+      );
+    } else if (subtype === "sub_group_link") {
+      rememberCommunity(chatId, null, "WAWebChatCollection.community_events", message);
+      for (const childId of groupIds) {
+        rememberRelation(
+          "community_child_group", chatId, childId,
+          "WAWebChatCollection.community_events", message
+        );
+      }
+    } else if (subtype === "sibling_group_link") {
+      const parentId = announcementParents.get(chatId);
+      if (parentId) for (const childId of groupIds) {
+        rememberRelation(
+          "community_child_group", parentId, childId,
+          "WAWebChatCollection.community_events", message
+        );
+      }
+    }
+  }
+
+  const hasStructuredSource = FC.collectionReadable(env.communities)
+    || Boolean(env.groupMetadata && env.chatCollection);
+  const hasObservedEvents = eventEntries.some(entry => [
+    "community_create", "empty_subgroup_create", "sub_group_link", "sibling_group_link"
+  ].includes(entry.subtype));
+  return {
+    status: hasStructuredSource || hasObservedEvents ? "supported" : "unavailable",
+    reason: hasStructuredSource ? null : hasObservedEvents ? "derived_from_community_events" : "community_sources_unavailable",
+    source: Array.from(sources).join("+") || null,
+    records: Array.from(records.values()).sort((left, right) => left.id.localeCompare(right.id)),
+    relations: Array.from(relations.values()).sort((left, right) => left.id.localeCompare(right.id))
+  };
+};
+
+FC.pinRecord = function pinRecord(model, index = 0) {
+  const chatId = FC.idString(FC.first(model, ["chatId", "chat", "remote"]));
+  const parentKey = FC.first(model, ["parentMsgKey", "msgKey", "messageKey", "parentMessageKey"]);
+  const messageId = FC.idString(parentKey) || FC.idString(FC.first(model, ["messageId", "parentMessageId"]));
+  const nativeId = FC.idString(FC.first(model, ["id", "key"]));
+  const pinType = FC.first(model, ["pinType", "type", "state"]);
+  return {
+    id: nativeId || `${messageId || chatId || "unknown"}:pin:${index}`,
+    dataset: "pins",
+    chatId: chatId || FC.chatId(model),
+    messageId,
+    actorId: FC.idString(FC.first(model, ["sender", "author", "participant"])),
+    timestamp: FC.modelTimestampValue(model, ["senderTimestampMs", "t", "timestamp", "createdAt"]),
+    state: pinType == null ? null : String(pinType),
+    raw: FC.rawSnapshot(model, {omitKeys: FC.REPEATED_COLLECTION_KEYS})
+  };
+};
+
+FC.pinRecords = function pinRecords(env) {
+  const records = new Map();
+  FC.collectionValues(env.pins).forEach((model, index) => {
+    const record = FC.pinRecord(model, index);
+    records.set(record.id, record);
+  });
+  return Array.from(records.values());
+};
+
+FC.pinRecordsForChat = function pinRecordsForChat(chatId, messages, env) {
+  const records = new Map(FC.pinRecords(env)
+    .filter(record => record.chatId === chatId)
+    .map(record => [record.id, record]));
+  for (const [index, message] of messages.entries()) {
+    const nativeType = String(FC.first(message, ["type", "kind"]) || "").toLowerCase();
+    const subtype = String(FC.first(message, ["subtype", "eventType"]) || "").toLowerCase();
+    const explicitPinned = FC.first(message, ["isPinned", "pinned", "pinInChat"]) === true;
+    const protocolMessage = FC.read(message, "protocolMessage");
+    const pinPayload = FC.first(message, ["pinInChat", "pinMessage", "pin"])
+      || FC.first(protocolMessage, ["pinInChat", "pinMessage", "pin", "pinnedMessage"]);
+    if (!explicitPinned && !/(?:^|_)(?:un)?pin(?:_|$)|pin_in_chat/.test(`${nativeType}_${subtype}`) && !pinPayload) {
+      continue;
+    }
+    const payload = pinPayload && typeof pinPayload === "object" ? pinPayload : message;
+    const messageId = FC.idString(FC.first(payload, [
+      "parentMsgKey", "msgKey", "messageKey", "parentMessageKey", "messageId"
+    ])) || FC.idString(FC.first(message, ["quotedStanzaID", "quotedMsgId"]));
+    const nativeId = FC.messageId(message);
+    const state = /unpin/.test(`${nativeType}_${subtype}`) ? "unpin" : "pin";
+    const record = {
+      id: nativeId || `${messageId || chatId}:pin-event:${index}`,
+      dataset: "pins", chatId, messageId,
+      actorId: FC.idString(FC.first(message, ["author", "from", "sender"])),
+      timestamp: FC.timestamp(message), state,
+      raw: FC.rawSnapshot(message, {omitKeys: FC.REPEATED_COLLECTION_KEYS})
+    };
+    records.set(record.id, record);
+  }
+  return Array.from(records.values());
+};
+
 FC.globalDatasets = function globalDatasets(env, overrides = {}) {
   const chatLists = env.chatLists ? FC.recordsFromCollection("chat_lists", env.chatLists) :
     FC.collectionValues(env.labels).map((model, index) => FC.genericRecord("chat_lists", model, index));
@@ -28,13 +264,13 @@ FC.globalDatasets = function globalDatasets(env, overrides = {}) {
       env.channels,
       ["channelEvents", "events", "messages", "msgs"]
     ),
-    communities: FC.recordsFromCollection("communities", env.communities),
-    community_relations: FC.recordsFromCollection("community_relations", env.communities)
+    communities: overrides.communities ?? FC.recordsFromCollection("communities", env.communities),
+    community_relations: overrides.community_relations ?? FC.recordsFromCollection("community_relations", env.communities)
       .filter(record => record.raw?.groups || record.raw?.subgroups || record.raw?.parent),
     presence_snapshots: FC.recordsFromCollection("presence_snapshots", env.presence),
     labels: FC.recordsFromCollection("labels", env.labels),
     label_relations: FC.recordsFromCollection("label_relations", env.labelItems),
-    pins: FC.recordsFromCollection("pins", env.pins)
+    pins: overrides.pins ?? FC.pinRecords(env)
   };
 };
 
@@ -254,8 +490,61 @@ FC.channelRecord = function channelRecord(model, index = 0, metadataOverride = n
   };
 };
 
-FC.channelMessageModels = function channelMessageModels(channel) {
-  return FC.collectionValues(FC.first(channel, ["channelEvents", "events", "messages", "msgs"]));
+FC.liveChannelModels = function liveChannelModels(channel, env = {}) {
+  const id = FC.idString(FC.first(channel, ["id", "wid", "jid"]));
+  const output = [];
+  const add = candidate => {
+    if (!candidate || FC.idString(FC.first(candidate, ["id", "wid", "jid"])) !== id || output.includes(candidate)) return;
+    output.push(candidate);
+  };
+  const addFromCollection = collection => {
+    try { if (typeof collection?.get === "function") add(collection.get(FC.first(channel, ["id", "wid", "jid"]))); } catch {}
+    try { if (typeof collection?.get === "function") add(collection.get(id)); } catch {}
+    FC.collectionValues(collection).forEach(add);
+  };
+  add(channel);
+  addFromCollection(env.channels);
+  // Current WhatsApp Web builds expose joined newsletters as chat-like models.
+  // WAWebChatLoadMessages may update this collection instead of the newsletter collection.
+  addFromCollection(env.chatCollection);
+  return output;
+};
+
+FC.channelMessageModels = function channelMessageModels(channel, env = {}) {
+  return FC.liveChannelModels(channel, env).flatMap(model =>
+    FC.collectionValues(FC.first(model, ["channelEvents", "events", "messages", "msgs"]))
+  );
+};
+
+FC.channelHistoryLoader = function channelHistoryLoader(channel, env) {
+  const liveModels = FC.liveChannelModels(channel, env);
+  for (const model of liveModels) {
+    const method = ["loadEarlierMsgs", "loadEarlierMessages", "loadMore"]
+      .find(name => typeof FC.read(model, name) === "function");
+    if (method) {
+      return {method: `channel_model.${method}`, load: () => model[method]()};
+    }
+  }
+
+  const channelModule = env.channelHistory?.default || env.channelHistory;
+  const channelMethod = ["loadEarlierMsgs", "loadEarlierMessages", "loadMore"]
+    .find(name => typeof FC.read(channelModule, name) === "function");
+  if (channelMethod) {
+    const live = liveModels.at(-1) || channel;
+    return {method: `newsletter_history.${channelMethod}`, load: () => channelModule[channelMethod](live)};
+  }
+
+  // Newsletter models in current builds share the normal chat history pipeline.
+  // This fallback is also the only history loader present in some builds.
+  const chatLoader = FC.historyLoader(env);
+  if (chatLoader) {
+    const live = liveModels.at(-1) || channel;
+    return {
+      method: "WAWebChatLoadMessages.loadEarlierMsgs",
+      load: () => chatLoader.loadEarlierMsgs({chat: live})
+    };
+  }
+  return null;
 };
 
 FC.loadChannelWindow = async function loadChannelWindow(channel, env, cutoffMs, isCancelled = () => false) {
@@ -270,11 +559,12 @@ FC.loadChannelWindow = async function loadChannelWindow(channel, env, cutoffMs, 
     }
     return added;
   };
-  absorb(FC.channelMessageModels(channel));
+  absorb(FC.channelMessageModels(channel, env));
   let rounds = 0;
   let stableRounds = 0;
   let reason = "window_already_materialized";
   let complete = false;
+  let method = null;
   while (!isCancelled() && rounds < 40) {
     const dated = Array.from(messages.values())
       .map(FC.timestampMillis)
@@ -285,22 +575,20 @@ FC.loadChannelWindow = async function loadChannelWindow(channel, env, cutoffMs, 
       reason = "window_start_reached";
       break;
     }
-    const modelLoader = ["loadEarlierMsgs", "loadEarlierMessages", "loadMore"]
-      .find(name => typeof FC.read(channel, name) === "function");
-    const storeLoader = ["loadEarlierMsgs", "loadEarlierMessages", "loadMore"]
-      .find(name => typeof FC.read(env.channelHistory, name) === "function");
-    if (!modelLoader && !storeLoader) {
+    const loader = FC.channelHistoryLoader(channel, env);
+    if (!loader) {
       reason = messages.size > 0 ? "channel_history_loader_unavailable" : "channel_messages_unavailable";
       break;
     }
+    method = loader.method;
     rounds += 1;
     const before = messages.size;
     try {
-      const result = modelLoader
-        ? await FC.datasetAwait(Promise.resolve(channel[modelLoader]()), 15_000, "channel_history_timeout")
-        : await FC.datasetAwait(Promise.resolve(env.channelHistory[storeLoader](channel)), 15_000, "channel_history_timeout");
+      const result = await FC.datasetAwait(
+        Promise.resolve(loader.load()), 120_000, "channel_history_timeout"
+      );
       absorb(FC.collectionValues(result));
-      absorb(FC.channelMessageModels(channel));
+      absorb(FC.channelMessageModels(channel, env));
     } catch (error) {
       reason = `channel_history_error:${String(error?.message || error)}`;
       break;
@@ -318,7 +606,7 @@ FC.loadChannelWindow = async function loadChannelWindow(channel, env, cutoffMs, 
       const timestamp = FC.timestampMillis(message);
       return timestamp === null || timestamp >= cutoffMs;
     }),
-    report: {complete, reason, rounds, cutoff: new Date(cutoffMs).toISOString()}
+    report: {complete, reason, method, rounds, cutoff: new Date(cutoffMs).toISOString()}
   };
 };
 
@@ -378,6 +666,7 @@ FC.collectChannels = async function collectChannels(env, isCancelled = () => fal
       record.windowStart = new Date(cutoffMs).toISOString();
       record.historyComplete = window.report.complete;
       record.historyReason = window.report.reason;
+      record.historyMethod = window.report.method;
     }
     for (const message of window.messages) {
       events.push({...FC.messageRecord(message, channelId), channelId});
@@ -395,11 +684,7 @@ FC.collectChannels = async function collectChannels(env, isCancelled = () => fal
 
 FC.participantsForChat = function participantsForChat(chat, env, identityIndex = new Map()) {
   const chatId = FC.idString(FC.first(chat, ["id", "wid"]));
-  let metadata = FC.first(chat, ["groupMetadata", "metadata"]);
-  if (!metadata) {
-    metadata = FC.collectionValues(env.groupMetadata)
-      .find(item => FC.idString(FC.first(item, ["id", "wid"])) === chatId);
-  }
+  const metadata = FC.groupMetadataForChat(chat, env);
   const participants = FC.collectionValues(FC.first(metadata, ["participants", "members"]));
   return participants.map((model, index) => {
     const id = FC.idString(FC.first(model, ["id", "wid"])) || `${chatId}_participant_${index}`;
@@ -484,7 +769,7 @@ FC.chatDerivedDatasets = function chatDerivedDatasets(chat, messages, env, ident
   appendOptional(receipts, "receipts", env.receipts);
 
   const mediaAlbums = Array.from(albumMembers.entries(), ([id, messageIds]) => ({id, chatId, messageIds}));
-  const pins = FC.recordsFromCollection("pins", env.pins).filter(record => record.chatId === chatId);
+  const pins = FC.pinRecordsForChat(chatId, messages, env);
   return {
     participants: FC.participantsForChat(chat, env, identityIndex),
     messages: messageRecords,

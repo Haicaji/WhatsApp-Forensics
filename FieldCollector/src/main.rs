@@ -2,6 +2,7 @@
 
 mod acquisition;
 mod app;
+mod portable;
 mod protocol;
 mod storage;
 mod transport;
@@ -9,8 +10,10 @@ mod viewer;
 
 use anyhow::{Result, anyhow};
 use app::CollectorApp;
+use portable::LaunchConfiguration;
 
 fn main() -> Result<()> {
+    let launch_configuration = LaunchConfiguration::for_current_process();
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1_280.0, 820.0])
@@ -20,7 +23,12 @@ fn main() -> Result<()> {
     eframe::run_native(
         "WhatsApp 网页现场快采",
         options,
-        Box::new(|creation| Ok(Box::new(CollectorApp::new(&creation.egui_ctx)))),
+        Box::new(move |creation| {
+            Ok(Box::new(CollectorApp::new(
+                &creation.egui_ctx,
+                launch_configuration,
+            )))
+        }),
     )
     .map_err(|error| anyhow!(error.to_string()))?;
     Ok(())

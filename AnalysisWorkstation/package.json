@@ -1,0 +1,28 @@
+{
+  "name": "wafc-analysis-workstation-portable",
+  "version": "0.1.13",
+  "private": true,
+  "description": "Portable WAFC case, task and Field Collector result review workstation",
+  "license": "AGPL-3.0-only",
+  "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "pnpm run build:packages && pnpm --filter @wafc/desktop build",
+    "build:packages": "pnpm --filter @wafc/domain build && pnpm --filter @wafc/evidence-repository build && pnpm --filter @wafc/workstation-core build",
+    "build:collector": "pnpm --dir ../FieldCollector build && cargo build --manifest-path ../FieldCollector/Cargo.toml --release --locked",
+    "typecheck": "pnpm run build:packages && pnpm -r --if-present run typecheck",
+    "test:collector": "cargo fmt --manifest-path ../FieldCollector/Cargo.toml -- --check && cargo clippy --manifest-path ../FieldCollector/Cargo.toml --all-targets --locked -- -D warnings && cargo test --manifest-path ../FieldCollector/Cargo.toml --locked && pnpm --dir ../FieldCollector test",
+    "test": "pnpm -r --if-present run test",
+    "check": "pnpm run typecheck && pnpm run test:collector && pnpm run test && pnpm run build",
+    "stage:collector": "node scripts/stage-field-collector.mjs",
+    "package:portable": "pnpm run check && pnpm run build:collector && pnpm run stage:collector && node scripts/build-portable.mjs",
+    "dev": "pnpm --filter @wafc/desktop dev",
+    "start": "pnpm run build && pnpm --filter @wafc/desktop start"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "typescript": "7.0.2"
+  }
+}

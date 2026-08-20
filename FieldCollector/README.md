@@ -14,6 +14,8 @@ Bag、签名或加密封装。
 - 优先调用 `WAWebChatLoadMessages.loadEarlierMsgs`，不可用时按会话 ID 打开并滚动；
 - 对消息按原生 ID 去重，并为每个会话写出历史完整性报告；
 - 记录 22 类数据的 `supported` / `unavailable` 能力状态；
+- 社群优先读取专用集合，并以群元数据和 `community_create`、`sub_group_link` 等已观察群事件回退重建社群—公告群—子群关系；
+- 会话内置顶优先读取 `WAWebPinInChatCollection`，并保留可观察消息协议事件的回退结果；
 - 动态通过 `WAWebStatusCollection` 主动同步并按发布者保存条目，不调用已读接口；
 - 历史通话优先通过 `WAWebDBMessageFindLocal.msgFindCallLog` 分页读取，并兼容新版内部 `Map` 集合；
 - 已加入频道会刷新 newsletter 成员身份元数据，排除明确的 `guest`，并在可配置滚动时间窗内加载频道消息；默认提取最近 15 天；
@@ -63,10 +65,24 @@ cargo run --locked
 2. 点击“加载已解压的扩展程序”，选择界面显示的 `FieldCollector\extension\dist`；
 3. 打开并登录 `https://web.whatsapp.com/`；
 4. 启动 Rust 程序，将界面的一次性配对码输入扩展；
-5. 确认输出目录并开始提取；提取结束后切换到“查看数据与源文件”。
+5. 在界面填写必填的检材名称，确认输出目录并开始提取；检材名称会保存到
+   `manifest.json` 的 `evidenceItem.name`；提取结束后切换到“查看数据与源文件”。
 
 每次修改 `extractor/src` 或 `extension/src` 后必须重新运行 `npm run build`。Rust 使用
 `include_str!` 编译嵌入 `extractor/dist/collector.iife.js`，扩展发布相同内容。
+
+### Analysis Workstation 便携任务模式
+
+当可执行文件旁存在有效的 `task.json` 时，程序进入便携任务模式：
+
+- 扩展目录固定为同级 `extension\`；
+- 结果目录固定为同级 `results\`，界面不允许修改；
+- 界面显示案件名称、任务名称和任务编号；
+- session 使用 `field-collector-session/6`，并在 `manifest.json` 写入 `sessionId` 和任务引用。
+
+如果相邻的 `task.json` 已存在但损坏，程序会显示阻断错误，不会静默回退到独立模式。没有
+`task.json` 时继续使用当前源码目录下的 `extension\dist` 和 `exports`，输出仍为
+`field-collector-session/5`，不改变现有独立使用方式。
 
 媒体缓存读取和 `downloadMedia` 参数兼容逻辑参考了 Apache-2.0 许可的
 [whatsapp-web.js](https://github.com/wwebjs/whatsapp-web.js) `resolveMediaBlob` 实现；

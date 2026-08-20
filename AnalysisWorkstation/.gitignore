@@ -1,0 +1,8 @@
+node_modules/
+dist/
+out/
+resources/field-collector-payload/
+AnalysisWorkstationData/
+.e2e-data/
+.e2e-artifacts/
+*.tsbuildinfo

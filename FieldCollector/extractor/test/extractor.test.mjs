@@ -159,6 +159,20 @@ test("media payload bodies are omitted from compact message records", () => {
   assert.equal("raw" in record, false);
 });
 
+test("outgoing messages keep the parent chat id instead of the local account id", () => {
+  const {FC} = load();
+  const record = FC.messageRecord({
+    id: {_serialized: "outgoing-message"},
+    from: {_serialized: "me@lid"},
+    to: {_serialized: "family@g.us"},
+    type: "chat",
+    body: "hello"
+  }, "family@g.us");
+  assert.equal(record.chatId, "family@g.us");
+  assert.equal(record.senderId, "me@lid");
+  assert.equal(record.recipientId, "family@g.us");
+});
+
 test("dataset batches are bounded by record count and serialized size", () => {
   const {FC} = load();
   const records = Array.from({length: 101}, (_, id) => ({id, text: "x".repeat(32)}));
@@ -212,13 +226,18 @@ test("current status, call-log and newsletter module variants are detected", () 
   const callStore = {privateCalls: new Map()};
   const channelStore = {_models: []};
   const metadataStore = {_models: []};
+  const groupMetadataStore = {_models: []};
+  const pinStore = {_models: []};
   const msgFindCallLog = async () => [];
   const modules = {
     WAWebStatusCollection: {StatusV3CollectionImpl: statusStore},
     WAWebCallCollection: {default: callStore},
     WAWebDBMessageFindLocal: {msgFindCallLog},
     WAWebNewsletterCollection: {default: channelStore},
-    WAWebNewsletterMetadataCollection: {default: metadataStore}
+    WAWebNewsletterMetadataCollection: {default: metadataStore},
+    WAWebGroupMetadataCollection: {GroupMetadataCollectionImpl: groupMetadataStore},
+    WAWebPinInChatCollection: {PinInChatCollectionImpl: pinStore},
+    WAWebChatCollection: {ChatCollection: {_models: []}}
   };
   context.require = name => modules[name] || null;
   const detected = FC.detectModules();
@@ -227,7 +246,103 @@ test("current status, call-log and newsletter module variants are detected", () 
   assert.equal(typeof detected.env.msgFindCallLog, "function");
   assert.equal(detected.env.channels, channelStore);
   assert.equal(detected.env.channelMetadata, metadataStore);
+  assert.equal(detected.env.groupMetadata, groupMetadataStore);
+  assert.equal(detected.env.pins, pinStore);
   assert.equal(detected.capabilities.datasets.calls.status, "supported");
+  assert.equal(detected.capabilities.datasets.communities.status, "supported");
+  assert.equal(detected.capabilities.datasets.pins.status, "supported");
+});
+
+test("communities fall back to group metadata and observed community events", () => {
+  const {FC} = load();
+  const parentId = "parent@g.us";
+  const announcementId = "announcement@g.us";
+  const childId = "child@g.us";
+  const chats = [
+    {id: {_serialized: parentId}, title: "Community"},
+    {id: {_serialized: announcementId}, title: "Announcements"},
+    {id: {_serialized: childId}, title: "Child"}
+  ];
+  const metadata = {
+    _models: [
+      {
+        id: {_serialized: parentId}, isParentGroup: true,
+        defaultSubgroup: {_serialized: announcementId},
+        subgroups: [{id: {_serialized: announcementId}}, {id: {_serialized: childId}}]
+      },
+      {id: {_serialized: childId}, parentGroup: {_serialized: parentId}}
+    ]
+  };
+  const result = FC.collectCommunities({chatCollection: {_models: chats}, groupMetadata: metadata}, [{
+    chatId: announcementId,
+    messages: [{
+      id: {_serialized: "community-event"}, type: "gp2", subtype: "community_create",
+      body: "Community", templateParams: [{_serialized: parentId}, "Community"]
+    }]
+  }]);
+  assert.equal(result.status, "supported");
+  assert.deepEqual(Array.from(result.records, record => record.id), [parentId]);
+  assert.ok(result.relations.some(relation =>
+    relation.relationKind === "community_announcement_group"
+      && relation.fromId === parentId && relation.toId === announcementId));
+  assert.ok(result.relations.some(relation =>
+    relation.relationKind === "community_child_group"
+      && relation.fromId === parentId && relation.toId === childId));
+  assert.ok(result.relations.some(relation =>
+    relation.relationKind === "community_parent"
+      && relation.fromId === childId && relation.toId === parentId));
+});
+
+test("community events alone reconstruct the visible parent and subgroup links", () => {
+  const {FC} = load();
+  const parentId = "parent@g.us";
+  const announcementId = "announcement@g.us";
+  const firstChildId = "first-child@g.us";
+  const secondChildId = "second-child@g.us";
+  const contexts = [
+    {
+      chatId: announcementId,
+      messages: [
+        {subtype: "community_create", body: "Community", templateParams: [{_serialized: parentId}, "Community"]},
+        {subtype: "sibling_group_link", templateParams: [{_serialized: firstChildId}, "First child"]}
+      ]
+    },
+    {
+      chatId: parentId,
+      messages: [{
+        subtype: "sub_group_link",
+        templateParams: [{_serialized: announcementId}, "Announcements", {_serialized: secondChildId}, "Second child"]
+      }]
+    },
+    {
+      chatId: firstChildId,
+      messages: [{subtype: "empty_subgroup_create", templateParams: [{_serialized: parentId}, "First child"]}]
+    }
+  ];
+  const result = FC.collectCommunities({chatCollection: {_models: []}}, contexts);
+  assert.equal(result.status, "supported");
+  assert.equal(result.reason, "derived_from_community_events");
+  assert.deepEqual(Array.from(result.records, record => record.id), [parentId]);
+  for (const childId of [announcementId, firstChildId, secondChildId]) {
+    assert.ok(result.relations.some(relation => relation.fromId === parentId && relation.toId === childId));
+  }
+});
+
+test("pin-in-chat records use the materialized collection and message fallback", () => {
+  const {FC} = load();
+  const chatId = "chat@g.us";
+  const materialized = {
+    id: {_serialized: "pin-record"}, chatId: {_serialized: chatId},
+    parentMsgKey: {_serialized: "message-1"}, pinType: "pin", senderTimestampMs: 1_000
+  };
+  const protocol = {
+    id: {_serialized: "pin-event"}, type: "protocol_pin", subtype: "pin_in_chat",
+    quotedStanzaID: "message-2", t: 2
+  };
+  const records = FC.pinRecordsForChat(chatId, [protocol], {pins: {_models: [materialized]}});
+  assert.equal(records.length, 2);
+  assert.ok(records.some(record => record.messageId === "message-1"));
+  assert.ok(records.some(record => record.messageId === "message-2" && record.state === "pin"));
 });
 
 test("historical call logs use the dedicated database query and native ids", async () => {
@@ -328,6 +443,43 @@ test("channel extraction keeps only the configured rolling window and exposes me
   assert.equal(result.mediaMessages.length, 1);
   assert.equal(result.mediaMessages[0].message, recent);
   assert.equal(result.records[0].windowDays, 15);
+});
+
+test("channel history falls back to the chat loader and still enforces the configured day window", async () => {
+  const {FC} = load();
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const newest = {id: {_serialized: "newest"}, t: nowSeconds - 86400, body: "one day ago"};
+  const withinWindow = {id: {_serialized: "within"}, t: nowSeconds - 10 * 86400, body: "ten days ago"};
+  const outsideWindow = {id: {_serialized: "outside"}, t: nowSeconds - 20 * 86400, body: "twenty days ago"};
+  const channel = {
+    id: {_serialized: "joined@newsletter"},
+    name: "Joined",
+    membershipType: "subscriber",
+    msgs: {_models: [newest]}
+  };
+  const liveChat = {id: channel.id, msgs: {_models: [newest]}};
+  let calls = 0;
+  const env = {
+    channels: {_models: [channel]},
+    chatCollection: {_models: [liveChat]},
+    historyLoader: {
+      async loadEarlierMsgs({chat}) {
+        assert.equal(chat, liveChat);
+        calls += 1;
+        const message = calls === 1 ? withinWindow : outsideWindow;
+        chat.msgs._models.push(message);
+        return [message];
+      }
+    }
+  };
+
+  const result = await FC.collectChannels(env, () => false, {days: 15});
+
+  assert.equal(calls, 2);
+  assert.deepEqual(Array.from(result.events, event => event.id), ["within", "newest"]);
+  assert.equal(result.records[0].historyComplete, true);
+  assert.equal(result.records[0].historyReason, "window_start_reached");
+  assert.equal(result.records[0].historyMethod, "WAWebChatLoadMessages.loadEarlierMsgs");
 });
 
 test("acquisition policy is bounded and defaults remain enabled", () => {

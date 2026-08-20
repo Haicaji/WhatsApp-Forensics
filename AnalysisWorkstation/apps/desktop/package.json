@@ -1,0 +1,35 @@
+{
+  "name": "@wafc/desktop",
+  "productName": "WAFC Analysis Workstation",
+  "version": "0.1.13",
+  "private": true,
+  "type": "module",
+  "description": "Portable WAFC Analysis Workstation Electron application",
+  "main": "dist/electron/main/index.cjs",
+  "scripts": {
+    "build": "tsc -p tsconfig.electron.json && vite build --config vite.main.config.mts && vite build --config vite.preload.config.mts && vite build",
+    "typecheck": "tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "test": "pnpm run build && node --test dist/electron/main/security.test.js",
+    "dev": "pnpm run build && electron .",
+    "start": "electron ."
+  },
+  "dependencies": {
+    "@phosphor-icons/react": "2.1.10",
+    "@tanstack/react-virtual": "3.13.12",
+    "@wafc/domain": "workspace:*",
+    "@wafc/evidence-repository": "workspace:*",
+    "@wafc/workstation-core": "workspace:*",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.0.5",
+    "electron": "43.3.0",
+    "typescript": "7.0.2",
+    "vite": "8.2.1"
+  }
+}
