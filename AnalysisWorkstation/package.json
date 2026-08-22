@@ -1,6 +1,6 @@
 {
   "name": "wafc-analysis-workstation-portable",
-  "version": "0.1.13",
+  "version": "0.1.38",
   "private": true,
   "description": "Portable WAFC case, task and Field Collector result review workstation",
   "license": "AGPL-3.0-only",

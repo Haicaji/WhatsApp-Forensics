@@ -1,7 +1,7 @@
 {
   "name": "@wafc/desktop",
   "productName": "WAFC Analysis Workstation",
-  "version": "0.1.13",
+  "version": "0.1.38",
   "private": true,
   "type": "module",
   "description": "Portable WAFC Analysis Workstation Electron application",

@@ -1,11 +1,11 @@
 //! Native WhatsApp-style viewer for exported JSON/CSV data and original files.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use eframe::egui::{self, Color32, ColorImage, RichText, TextureHandle};
 use serde_json::{Map, Value};
 
@@ -30,6 +30,44 @@ struct ChatSummary {
     phone: Option<String>,
     unread_count: u64,
     last_activity: Option<String>,
+    community: Option<CommunityMembership>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommunityGroupRole {
+    Announcement,
+    Group,
+}
+
+#[derive(Clone)]
+struct CommunityMembership {
+    id: String,
+    title: String,
+    role: CommunityGroupRole,
+}
+
+#[derive(Clone)]
+struct CommunityChild {
+    id: String,
+    title: String,
+    role: CommunityGroupRole,
+    chat_index: Option<usize>,
+}
+
+#[derive(Clone)]
+struct CommunitySummary {
+    id: String,
+    title: String,
+    description: Option<String>,
+    created_at: Option<String>,
+    children: Vec<CommunityChild>,
+}
+
+#[derive(Default)]
+struct CommunityIndex {
+    communities: Vec<CommunitySummary>,
+    by_chat_id: HashMap<String, CommunityMembership>,
+    root_chat_ids: HashSet<String>,
 }
 
 #[derive(Default)]
@@ -51,27 +89,30 @@ struct ChatData {
 enum ViewerSection {
     #[default]
     Chats,
+    Calls,
     Statuses,
     Channels,
-    Calls,
+    Communities,
     More,
 }
 
 impl ViewerSection {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Chats,
+        Self::Calls,
         Self::Statuses,
         Self::Channels,
-        Self::Calls,
+        Self::Communities,
         Self::More,
     ];
 
     fn label(self) -> &'static str {
         match self {
             Self::Chats => "聊天",
+            Self::Calls => "通话",
             Self::Statuses => "动态",
             Self::Channels => "频道",
-            Self::Calls => "通话",
+            Self::Communities => "社群",
             Self::More => "更多数据",
         }
     }
@@ -79,9 +120,10 @@ impl ViewerSection {
     fn short_label(self) -> &'static str {
         match self {
             Self::Chats => "聊",
+            Self::Calls => "话",
             Self::Statuses => "动",
             Self::Channels => "频",
-            Self::Calls => "话",
+            Self::Communities => "社",
             Self::More => "更多",
         }
     }
@@ -131,6 +173,9 @@ pub struct ViewerState {
     calls: Vec<Value>,
     selected_call: Option<usize>,
 
+    communities: Vec<CommunitySummary>,
+    selected_community: Option<usize>,
+
     more_datasets: Vec<MoreDataset>,
     selected_more: Option<usize>,
     more_records: Vec<Value>,
@@ -148,7 +193,8 @@ impl ViewerState {
         let manifest = read_json(&path.join("manifest.json"))?;
         let names = load_contact_names(path)?;
         let avatars = load_avatar_paths(path);
-        let chats = load_chat_summaries(path)?;
+        let mut chats = load_chat_summaries(path)?;
+        let community_index = apply_community_topology(path, &mut chats);
         let statuses = normalize_statuses(read_optional_array(&path.join("global/statuses.json")));
         let channels = read_optional_array(&path.join("global/channels.json"))
             .into_iter()
@@ -170,6 +216,7 @@ impl ViewerState {
         self.channel_events = channel_events;
         self.channel_media = channel_media;
         self.calls = calls;
+        self.communities = community_index.communities;
         self.more_datasets = more_datasets;
         self.section = ViewerSection::Chats;
         self.filter.clear();
@@ -178,6 +225,7 @@ impl ViewerState {
         self.selected_status = (!self.statuses.is_empty()).then_some(0);
         self.selected_channel = (!self.channels.is_empty()).then_some(0);
         self.selected_call = (!self.calls.is_empty()).then_some(0);
+        self.selected_community = (!self.communities.is_empty()).then_some(0);
         self.selected_more = (!self.more_datasets.is_empty()).then_some(0);
         self.more_records.clear();
         self.detail = None;
@@ -210,7 +258,7 @@ impl ViewerState {
             empty_state(
                 ui,
                 "尚未加载提取结果",
-                "选择包含 manifest.json 的结果目录后，即可按聊天、动态、频道和通话查看。",
+                "选择包含 manifest.json 的结果目录后，即可按聊天、通话、动态、频道和社群查看。",
             );
             return;
         }
@@ -344,18 +392,23 @@ impl ViewerState {
                         );
                     });
                 });
-                ui.add_space(4.0);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.filter)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("搜索"),
-                );
-                ui.add_space(6.0);
+                if self.section == ViewerSection::Communities {
+                    ui.add_space(10.0);
+                } else {
+                    ui.add_space(4.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.filter)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("搜索"),
+                    );
+                    ui.add_space(6.0);
+                }
                 match self.section {
                     ViewerSection::Chats => self.chat_sidebar(ui, context),
+                    ViewerSection::Calls => self.call_sidebar(ui, context),
                     ViewerSection::Statuses => self.status_sidebar(ui, context),
                     ViewerSection::Channels => self.channel_sidebar(ui, context),
-                    ViewerSection::Calls => self.call_sidebar(ui, context),
+                    ViewerSection::Communities => self.community_sidebar(ui, context),
                     ViewerSection::More => self.more_sidebar(ui),
                 }
             });
@@ -364,9 +417,10 @@ impl ViewerState {
     fn section_count(&self) -> usize {
         match self.section {
             ViewerSection::Chats => self.chats.len(),
+            ViewerSection::Calls => self.calls.len(),
             ViewerSection::Statuses => self.statuses.len(),
             ViewerSection::Channels => self.channels.len(),
-            ViewerSection::Calls => self.calls.len(),
+            ViewerSection::Communities => self.communities.len(),
             ViewerSection::More => self.more_datasets.len(),
         }
     }
@@ -398,18 +452,50 @@ impl ViewerState {
                         .last_activity
                         .as_deref()
                         .map_or_else(|| "时间未知".to_owned(), short_time);
-                    if self.sidebar_row(
+                    if self.chat_sidebar_row(
                         ui,
                         context,
-                        &chat.id,
-                        &chat.title,
+                        &chat,
                         &subtitle,
                         &meta,
-                        chat.unread_count,
                         self.selected_chat == Some(index),
                     ) && let Err(error) = self.load_chat(index)
                     {
                         self.error = Some(error.to_string());
+                    }
+                }
+            });
+    }
+
+    fn community_sidebar(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
+        if self.communities.is_empty() {
+            sidebar_empty(ui, "没有采集到社群合集");
+            return;
+        }
+        let rows = self.communities.clone();
+        egui::ScrollArea::vertical()
+            .id_salt("viewer_community_sidebar_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (index, community) in rows.into_iter().enumerate() {
+                    let group_count = community
+                        .children
+                        .iter()
+                        .filter(|child| child.role == CommunityGroupRole::Group)
+                        .count();
+                    let subtitle = format!("{group_count} 个群组");
+                    if self.sidebar_row(
+                        ui,
+                        context,
+                        &community.id,
+                        &community.title,
+                        &subtitle,
+                        "社群合集",
+                        0,
+                        self.selected_community == Some(index),
+                    ) {
+                        self.selected_community = Some(index);
+                        self.detail = None;
                     }
                 }
             });
@@ -611,6 +697,132 @@ impl ViewerState {
             });
     }
 
+    fn chat_sidebar_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        context: &egui::Context,
+        chat: &ChatSummary,
+        subtitle: &str,
+        meta: &str,
+        selected: bool,
+    ) -> bool {
+        let response = egui::Frame::new()
+            .fill(if selected {
+                SELECTED_SURFACE
+            } else {
+                LIST_SURFACE
+            })
+            .corner_radius(8.0)
+            .inner_margin(egui::Margin::symmetric(8, 8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    self.chat_avatar(ui, context, chat, selected, 48.0);
+                    ui.vertical(|ui| {
+                        ui.set_width((ui.available_width() - 4.0).max(80.0));
+                        if let Some(community) = &chat.community
+                            && community.role == CommunityGroupRole::Group
+                        {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&community.title)
+                                        .small()
+                                        .color(TEXT_SECONDARY),
+                                )
+                                .truncate(),
+                            );
+                        }
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&chat.title).color(TEXT_PRIMARY).strong(),
+                                )
+                                .truncate(),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(RichText::new(meta).small().color(TEXT_SECONDARY));
+                                },
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(subtitle).small().color(TEXT_SECONDARY),
+                                )
+                                .truncate(),
+                            );
+                            if chat.unread_count > 0 {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            RichText::new(chat.unread_count.to_string())
+                                                .small()
+                                                .color(Color32::WHITE)
+                                                .background_color(ACCENT),
+                                        );
+                                    },
+                                );
+                            }
+                        });
+                    });
+                });
+            })
+            .response
+            .interact(egui::Sense::click());
+        ui.add_space(3.0);
+        response.clicked()
+    }
+
+    fn chat_avatar(
+        &mut self,
+        ui: &mut egui::Ui,
+        context: &egui::Context,
+        chat: &ChatSummary,
+        selected: bool,
+        size: f32,
+    ) {
+        let Some(community) = &chat.community else {
+            self.avatar(ui, context, &chat.id, &chat.title, size - 6.0);
+            return;
+        };
+        if community.role == CommunityGroupRole::Announcement {
+            self.avatar(ui, context, &community.id, &community.title, size - 6.0);
+            return;
+        }
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+        let painter = ui.painter();
+        let border = if selected {
+            SELECTED_SURFACE
+        } else {
+            LIST_SURFACE
+        };
+        let parent_center = egui::pos2(rect.left() + size * 0.31, rect.top() + size * 0.31);
+        let child_center = egui::pos2(rect.right() - size * 0.34, rect.bottom() - size * 0.34);
+        painter.circle_filled(parent_center, size * 0.28, Color32::from_rgb(14, 93, 85));
+        painter.circle_stroke(parent_center, size * 0.28, egui::Stroke::new(2.0, border));
+        painter.text(
+            parent_center,
+            egui::Align2::CENTER_CENTER,
+            "社",
+            egui::FontId::proportional(size * 0.24),
+            TEXT_PRIMARY,
+        );
+        painter.circle_filled(child_center, size * 0.34, SELECTED_SURFACE);
+        painter.circle_stroke(child_center, size * 0.34, egui::Stroke::new(2.0, border));
+        painter.text(
+            child_center,
+            egui::Align2::CENTER_CENTER,
+            chat.title
+                .chars()
+                .find(|character| !character.is_whitespace())
+                .unwrap_or('?'),
+            egui::FontId::proportional(size * 0.30),
+            TEXT_PRIMARY,
+        );
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn sidebar_row(
         &mut self,
@@ -783,9 +995,10 @@ impl ViewerState {
     fn content(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
         match self.section {
             ViewerSection::Chats => self.chat_content(ui, context),
+            ViewerSection::Calls => self.call_content(ui, context),
             ViewerSection::Statuses => self.status_content(ui, context),
             ViewerSection::Channels => self.channel_content(ui, context),
-            ViewerSection::Calls => self.call_content(ui, context),
+            ViewerSection::Communities => self.community_content(ui, context),
             ViewerSection::More => self.more_content(ui),
         }
     }
@@ -807,11 +1020,34 @@ impl ViewerState {
                 return;
             };
         let chat_id = chat_record["id"].as_str().unwrap_or("unknown").to_owned();
-        let title = chat_record["title"].as_str().unwrap_or(&chat_id).to_owned();
+        let selected_summary = self
+            .selected_chat
+            .and_then(|index| self.chats.get(index))
+            .cloned();
+        let title = selected_summary.as_ref().map_or_else(
+            || chat_record["title"].as_str().unwrap_or(&chat_id).to_owned(),
+            |chat| chat.title.clone(),
+        );
+        let community = selected_summary.and_then(|chat| chat.community);
 
         section_header(ui, |ui| {
-            self.avatar(ui, context, &chat_id, &title, 42.0);
+            if let Some(community) = &community
+                && community.role == CommunityGroupRole::Announcement
+            {
+                self.avatar(ui, context, &community.id, &community.title, 42.0);
+            } else {
+                self.avatar(ui, context, &chat_id, &title, 42.0);
+            }
             ui.vertical(|ui| {
+                if let Some(community) = &community
+                    && community.role == CommunityGroupRole::Group
+                {
+                    ui.label(
+                        RichText::new(format!("{} · 社群中的群组", community.title))
+                            .small()
+                            .color(TEXT_SECONDARY),
+                    );
+                }
                 ui.label(
                     RichText::new(&title)
                         .color(TEXT_PRIMARY)
@@ -1218,7 +1454,9 @@ impl ViewerState {
                             semantic_row(
                                 ui,
                                 "时间",
-                                call["timestamp"].as_str().unwrap_or("时间未知"),
+                                call["timestamp"]
+                                    .as_str()
+                                    .map_or_else(|| "时间未知".to_owned(), full_time),
                             );
                             semantic_row(ui, "方向", call_direction_label(&call));
                             semantic_row(ui, "类型", call_type_label(&call));
@@ -1245,9 +1483,103 @@ impl ViewerState {
             });
     }
 
+    fn community_content(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
+        let Some(index) = self.selected_community else {
+            empty_state(ui, "没有社群", "当前提取结果没有可确认的社群关系。");
+            return;
+        };
+        let Some(community) = self.communities.get(index).cloned() else {
+            empty_state(ui, "社群不可用", "所选社群记录不存在。");
+            return;
+        };
+        let group_count = community
+            .children
+            .iter()
+            .filter(|child| child.role == CommunityGroupRole::Group)
+            .count();
+
+        section_header(ui, |ui| {
+            self.avatar(ui, context, &community.id, &community.title, 42.0);
+            ui.vertical(|ui| {
+                ui.label(
+                    RichText::new(&community.title)
+                        .color(TEXT_PRIMARY)
+                        .strong()
+                        .size(17.0),
+                );
+                ui.label(
+                    RichText::new(format!("{group_count} 个群组"))
+                        .small()
+                        .color(TEXT_SECONDARY),
+                );
+            });
+        });
+
+        let announcements = community
+            .children
+            .iter()
+            .filter(|child| child.role == CommunityGroupRole::Announcement)
+            .cloned()
+            .collect::<Vec<_>>();
+        let groups = community
+            .children
+            .iter()
+            .filter(|child| child.role == CommunityGroupRole::Group)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut open_chat = None;
+        scroll_surface(ui, "viewer_community_content_scroll", |ui| {
+            if let Some(description) = community.description.as_deref() {
+                ui.add(egui::Label::new(RichText::new(description).color(TEXT_SECONDARY)).wrap());
+                ui.add_space(10.0);
+            }
+            if let Some(created_at) = community.created_at.as_deref() {
+                ui.label(
+                    RichText::new(format!("创建时间 {}", short_time(created_at)))
+                        .small()
+                        .color(TEXT_SECONDARY),
+                );
+                ui.add_space(12.0);
+            }
+
+            if !announcements.is_empty() {
+                detail_subheading(ui, "主对话");
+                ui.add_space(4.0);
+                for child in &announcements {
+                    if self.community_child_row(ui, context, &community, child) {
+                        open_chat = child.chat_index;
+                    }
+                }
+                ui.add_space(12.0);
+            }
+
+            detail_subheading(ui, "你所在的群组");
+            ui.add_space(4.0);
+            if groups.is_empty() {
+                ui.label(RichText::new("没有采集到已关联群组").color(TEXT_SECONDARY));
+            } else {
+                for child in &groups {
+                    if self.community_child_row(ui, context, &community, child) {
+                        open_chat = child.chat_index;
+                    }
+                }
+            }
+        });
+
+        if let Some(chat_index) = open_chat {
+            match self.load_chat(chat_index) {
+                Ok(()) => {
+                    self.section = ViewerSection::Chats;
+                    self.filter.clear();
+                }
+                Err(error) => self.error = Some(error.to_string()),
+            }
+        }
+    }
+
     fn more_content(&mut self, ui: &mut egui::Ui) {
         let Some(dataset_index) = self.selected_more else {
-            empty_state(ui, "没有更多数据", "能力状态、社群和标签等会显示在这里。");
+            empty_state(ui, "没有更多数据", "能力状态、标签和其他数据会显示在这里。");
             return;
         };
         let Some(dataset) = self.more_datasets.get(dataset_index).cloned() else {
@@ -1607,6 +1939,81 @@ fn parsed_card(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
         .show(ui, content);
 }
 
+impl ViewerState {
+    fn community_child_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        context: &egui::Context,
+        community: &CommunitySummary,
+        child: &CommunityChild,
+    ) -> bool {
+        let response = egui::Frame::new()
+            .fill(CHAT_SURFACE)
+            .inner_margin(egui::Margin::symmetric(9, 8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if child.role == CommunityGroupRole::Announcement {
+                        self.avatar(ui, context, &community.id, &community.title, 42.0);
+                    } else {
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(44.0, 44.0), egui::Sense::hover());
+                        let parent = egui::pos2(rect.left() + 14.0, rect.top() + 14.0);
+                        let group = egui::pos2(rect.right() - 15.0, rect.bottom() - 15.0);
+                        ui.painter()
+                            .circle_filled(parent, 12.0, Color32::from_rgb(14, 93, 85));
+                        ui.painter().text(
+                            parent,
+                            egui::Align2::CENTER_CENTER,
+                            "社",
+                            egui::FontId::proportional(11.0),
+                            TEXT_PRIMARY,
+                        );
+                        ui.painter().circle_filled(group, 15.0, SELECTED_SURFACE);
+                        ui.painter().circle_stroke(
+                            group,
+                            15.0,
+                            egui::Stroke::new(2.0, CHAT_SURFACE),
+                        );
+                        ui.painter().text(
+                            group,
+                            egui::Align2::CENTER_CENTER,
+                            child
+                                .title
+                                .chars()
+                                .find(|character| !character.is_whitespace())
+                                .unwrap_or('?'),
+                            egui::FontId::proportional(14.0),
+                            TEXT_PRIMARY,
+                        );
+                    }
+                    ui.vertical(|ui| {
+                        let title = if child.role == CommunityGroupRole::Announcement {
+                            &community.title
+                        } else {
+                            &child.title
+                        };
+                        ui.label(RichText::new(title).color(TEXT_PRIMARY).strong());
+                        let status = match (child.role, child.chat_index) {
+                            (CommunityGroupRole::Announcement, Some(_)) => "社群主对话",
+                            (CommunityGroupRole::Group, Some(_)) => "社群中的群组",
+                            (_, None) => "未采集到对话内容",
+                        };
+                        ui.label(RichText::new(status).small().color(TEXT_SECONDARY));
+                    });
+                });
+            })
+            .response
+            .interact(if child.chat_index.is_some() {
+                egui::Sense::click()
+            } else {
+                egui::Sense::hover()
+            });
+        let clicked = response.on_hover_text(&child.id).clicked();
+        ui.separator();
+        clicked
+    }
+}
+
 fn empty_state(ui: &mut egui::Ui, title: &str, body: &str) {
     let available = ui.available_size();
     ui.allocate_ui_with_layout(
@@ -1703,7 +2110,7 @@ fn show_semantic_value(ui: &mut egui::Ui, value: &Value, depth: usize) {
                     Value::Object(_) | Value::Array(_) => {
                         semantic_row(ui, field_label(key), compact_collection(child));
                     }
-                    _ => semantic_row(ui, field_label(key), value_label(child)),
+                    _ => semantic_row(ui, field_label(key), field_value_label(key, child)),
                 }
             }
         }
@@ -1838,6 +2245,23 @@ fn field_label(key: &str) -> String {
     .to_owned()
 }
 
+fn field_value_label(key: &str, value: &Value) -> String {
+    let normalized = key.to_ascii_lowercase();
+    let is_timestamp = normalized == "timestamp"
+        || normalized.ends_with("timestamp")
+        || normalized.ends_with("atutc")
+        || normalized.ends_with("at")
+        || normalized.ends_with("time");
+    if !is_timestamp {
+        return value_label(value);
+    }
+    match value {
+        Value::String(value) => full_time(value),
+        Value::Number(value) => epoch_number_to_local(value).unwrap_or_else(|| value.to_string()),
+        _ => value_label(value),
+    }
+}
+
 fn value_label(value: &Value) -> String {
     match value {
         Value::Null => "未提供".to_owned(),
@@ -1955,14 +2379,15 @@ fn related_records(records: &[Value], message_id: &str) -> Vec<Value> {
 }
 
 fn message_day_markers(messages: &[Value]) -> Vec<Option<String>> {
-    let mut previous = None;
+    let mut previous_key = None;
     messages
         .iter()
         .map(|message| {
-            let day = record_timestamp(message).and_then(parse_day);
-            if day.is_some() && day != previous {
-                previous.clone_from(&day);
-                day
+            let timestamp = record_timestamp(message);
+            let day_key = timestamp.and_then(parse_day_key);
+            if day_key.is_some() && day_key != previous_key {
+                previous_key = day_key;
+                timestamp.and_then(parse_day)
             } else {
                 None
             }
@@ -1977,18 +2402,69 @@ fn record_timestamp(value: &Value) -> Option<&str> {
         .or_else(|| value["time"].as_str())
 }
 
+fn parse_day_key(value: &str) -> Option<String> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|timestamp| {
+            timestamp
+                .with_timezone(&Local)
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .or_else(|| (value.len() >= 10).then(|| value[..10].to_owned()))
+}
+
 fn parse_day(value: &str) -> Option<String> {
     DateTime::parse_from_rfc3339(value)
         .ok()
-        .map(|timestamp| timestamp.format("%Y年%m月%d日").to_string())
+        .map(|timestamp| {
+            timestamp
+                .with_timezone(&Local)
+                .format("%Y年%m月%d日 · UTC%:z")
+                .to_string()
+        })
         .or_else(|| (value.len() >= 10).then(|| value[..10].to_owned()))
 }
 
 fn short_time(value: &str) -> String {
     DateTime::parse_from_rfc3339(value).ok().map_or_else(
         || value.chars().take(16).collect(),
-        |timestamp| timestamp.format("%m-%d %H:%M").to_string(),
+        |timestamp| {
+            timestamp
+                .with_timezone(&Local)
+                .format("%m-%d %H:%M UTC%:z")
+                .to_string()
+        },
     )
+}
+
+fn full_time(value: &str) -> String {
+    DateTime::parse_from_rfc3339(value).ok().map_or_else(
+        || value.to_owned(),
+        |timestamp| {
+            timestamp
+                .with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S UTC%:z")
+                .to_string()
+        },
+    )
+}
+
+fn epoch_number_to_local(value: &serde_json::Number) -> Option<String> {
+    let numeric = value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))?;
+    let milliseconds = if numeric.unsigned_abs() < 10_000_000_000 {
+        numeric.checked_mul(1_000)?
+    } else {
+        numeric
+    };
+    DateTime::<Utc>::from_timestamp_millis(milliseconds).map(|timestamp| {
+        timestamp
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S UTC%:z")
+            .to_string()
+    })
 }
 
 fn epoch_to_rfc3339(value: &Value) -> Option<String> {
@@ -2088,10 +2564,201 @@ fn load_chat_summaries(root: &Path) -> anyhow::Result<Vec<ChatSummary>> {
                 .map(ToOwned::to_owned),
             unread_count: chat["unreadCount"].as_u64().unwrap_or(0),
             last_activity,
+            community: None,
         });
     }
     chats.sort_by(|left, right| right.last_activity.cmp(&left.last_activity));
     Ok(chats)
+}
+
+fn apply_community_topology(root: &Path, chats: &mut Vec<ChatSummary>) -> CommunityIndex {
+    let detected = load_community_index(root, chats);
+    chats.retain(|chat| !detected.root_chat_ids.contains(&chat.id));
+
+    let index = load_community_index(root, chats);
+    for chat in chats {
+        chat.community = index.by_chat_id.get(&chat.id).cloned();
+        if let Some(community) = &chat.community
+            && community.role == CommunityGroupRole::Announcement
+        {
+            chat.title.clone_from(&community.title);
+        }
+    }
+    index
+}
+
+#[allow(clippy::too_many_lines)]
+fn load_community_index(root: &Path, chats: &[ChatSummary]) -> CommunityIndex {
+    let records = read_optional_array(&root.join("global/communities.json"));
+    let relations = read_optional_array(&root.join("global/community-relations.json"));
+    let chat_titles = chats
+        .iter()
+        .map(|chat| (chat.id.clone(), chat.title.clone()))
+        .collect::<HashMap<_, _>>();
+    let chat_indices = chats
+        .iter()
+        .enumerate()
+        .map(|(index, chat)| (chat.id.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let community_records = records
+        .into_iter()
+        .filter_map(|record| {
+            let id = record["id"].as_str()?.to_owned();
+            is_whatsapp_group_id(&id).then_some((id, record))
+        })
+        .collect::<HashMap<_, _>>();
+    let community_titles = community_records
+        .iter()
+        .map(|(id, record)| {
+            let title = record["title"]
+                .as_str()
+                .or_else(|| record["name"].as_str())
+                .filter(|value| !value.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .or_else(|| chat_titles.get(id).cloned())
+                .unwrap_or_else(|| compact_id(id));
+            (id.clone(), title)
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut community_ids = HashSet::new();
+    for (id, record) in &community_records {
+        let explicit_collection = record["source"]
+            .as_str()
+            .is_some_and(|source| source.starts_with("WAWebCommunity"));
+        let raw = &record["raw"];
+        let explicit_parent = record["isParentGroup"].as_bool() == Some(true)
+            || record["isCommunity"].as_bool() == Some(true)
+            || record["isCommunityParentGroup"].as_bool() == Some(true)
+            || raw["isParentGroup"].as_bool() == Some(true)
+            || raw["isCommunity"].as_bool() == Some(true)
+            || raw["isCommunityParentGroup"].as_bool() == Some(true);
+        if explicit_collection || explicit_parent {
+            community_ids.insert(id.clone());
+        }
+    }
+
+    let mut by_chat_id: HashMap<String, CommunityMembership> = HashMap::new();
+    let mut children_by_community: HashMap<String, Vec<CommunityChild>> = HashMap::new();
+    {
+        let mut remember = |community_id: &str, child_id: &str, role: CommunityGroupRole| {
+            if community_id == child_id
+                || !is_whatsapp_group_id(community_id)
+                || !is_whatsapp_group_id(child_id)
+            {
+                return;
+            }
+            community_ids.insert(community_id.to_owned());
+            let community_title = community_titles
+                .get(community_id)
+                .cloned()
+                .or_else(|| chat_titles.get(community_id).cloned())
+                .unwrap_or_else(|| compact_id(community_id));
+            let should_replace = by_chat_id.get(child_id).is_none_or(|current| {
+                role == CommunityGroupRole::Announcement
+                    && current.role != CommunityGroupRole::Announcement
+            });
+            if should_replace {
+                by_chat_id.insert(
+                    child_id.to_owned(),
+                    CommunityMembership {
+                        id: community_id.to_owned(),
+                        title: community_title,
+                        role,
+                    },
+                );
+            }
+
+            let child = CommunityChild {
+                id: child_id.to_owned(),
+                title: chat_titles
+                    .get(child_id)
+                    .cloned()
+                    .unwrap_or_else(|| compact_id(child_id)),
+                role,
+                chat_index: chat_indices.get(child_id).copied(),
+            };
+            let children = children_by_community
+                .entry(community_id.to_owned())
+                .or_default();
+            if let Some(existing) = children.iter_mut().find(|item| item.id == child_id) {
+                if role == CommunityGroupRole::Announcement {
+                    *existing = child;
+                }
+            } else {
+                children.push(child);
+            }
+        };
+
+        for relation in relations {
+            let Some(kind) = relation["relationKind"].as_str() else {
+                continue;
+            };
+            let Some(from_id) = relation["fromId"].as_str() else {
+                continue;
+            };
+            let Some(to_id) = relation["toId"].as_str() else {
+                continue;
+            };
+            match kind {
+                "community_parent" => remember(to_id, from_id, CommunityGroupRole::Group),
+                "community_child_group" => remember(from_id, to_id, CommunityGroupRole::Group),
+                "community_announcement_group" => {
+                    remember(from_id, to_id, CommunityGroupRole::Announcement);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let root_chat_ids = community_ids.clone();
+    let mut ids = community_ids.into_iter().collect::<Vec<_>>();
+    ids.sort_by(|left, right| {
+        let left_title = community_titles.get(left).unwrap_or(left);
+        let right_title = community_titles.get(right).unwrap_or(right);
+        left_title.cmp(right_title)
+    });
+    let communities = ids
+        .into_iter()
+        .map(|id| {
+            let record = community_records.get(&id);
+            let mut children = children_by_community.remove(&id).unwrap_or_default();
+            children.sort_by(|left, right| {
+                let left_rank = usize::from(left.role == CommunityGroupRole::Group);
+                let right_rank = usize::from(right.role == CommunityGroupRole::Group);
+                left_rank
+                    .cmp(&right_rank)
+                    .then_with(|| left.title.cmp(&right.title))
+            });
+            CommunitySummary {
+                title: community_titles
+                    .get(&id)
+                    .cloned()
+                    .or_else(|| chat_titles.get(&id).cloned())
+                    .unwrap_or_else(|| compact_id(&id)),
+                description: record
+                    .and_then(|value| value["description"].as_str())
+                    .filter(|value| !value.trim().is_empty())
+                    .map(ToOwned::to_owned),
+                created_at: record
+                    .and_then(|value| value["createdAt"].as_str())
+                    .or_else(|| record.and_then(|value| value["createdAtUtc"].as_str()))
+                    .map(ToOwned::to_owned),
+                id,
+                children,
+            }
+        })
+        .collect();
+
+    CommunityIndex {
+        communities,
+        by_chat_id,
+        root_chat_ids,
+    }
+}
+
+fn is_whatsapp_group_id(value: &str) -> bool {
+    value.to_ascii_lowercase().ends_with("@g.us")
 }
 
 fn load_contact_names(root: &Path) -> anyhow::Result<HashMap<String, String>> {
@@ -2205,6 +2872,8 @@ fn discover_more_datasets(root: &Path) -> anyhow::Result<Vec<MoreDataset>> {
                                 | "calls.json"
                                 | "channels.json"
                                 | "channel-events.json"
+                                | "communities.json"
+                                | "community-relations.json"
                         )
                     )
                 }),
@@ -2534,11 +3203,12 @@ fn open_file(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ViewerState, call_direction_label, call_result_label, call_type_label, channel_events_for,
+        ChatSummary, CommunityGroupRole, ViewerSection, ViewerState, apply_community_topology,
+        call_direction_label, call_result_label, call_type_label, channel_events_for,
         channel_media_for, detail_replaces_content, format_duration, hidden_field,
         load_avatar_paths, looks_like_base64_payload, message_day_markers, message_preview,
         normalize_records, normalize_statuses, parse_csv, read_dataset_array, record_summary,
-        relative_display,
+        relative_display, short_time,
     };
     use serde_json::json;
     use std::{fs, path::Path};
@@ -2617,22 +3287,20 @@ mod tests {
     #[test]
     fn message_days_only_mark_the_first_message_of_each_date() {
         let messages = vec![
-            json!({"timestamp":"2026-08-17T23:59:00Z"}),
-            json!({"timestamp":"2026-08-17T23:59:30Z"}),
-            json!({"timestamp":"2026-08-18T00:01:00Z"}),
+            json!({"timestamp":"2026-08-17T12:00:00Z"}),
+            json!({"timestamp":"2026-08-17T12:01:00Z"}),
+            json!({"timestamp":"2026-08-18T12:01:00Z"}),
         ];
         let markers = message_day_markers(&messages);
+        assert!(markers[0].is_some());
+        assert_eq!(markers[1], None);
+        assert!(markers[2].is_some());
         assert!(
             markers[0]
                 .as_deref()
-                .is_some_and(|value| value.contains("08月17日"))
+                .is_some_and(|value| value.contains("UTC"))
         );
-        assert_eq!(markers[1], None);
-        assert!(
-            markers[2]
-                .as_deref()
-                .is_some_and(|value| value.contains("08月18日"))
-        );
+        assert!(short_time("2026-08-17T12:00:00Z").contains("UTC"));
     }
 
     #[test]
@@ -2778,6 +3446,112 @@ mod tests {
         assert_eq!(viewer.statuses.len(), 0);
         assert_eq!(viewer.channels.len(), 0);
         assert_eq!(viewer.calls.len(), 0);
+        assert_eq!(viewer.communities.len(), 0);
+    }
+
+    #[test]
+    fn community_index_keeps_only_real_roots_and_links_child_chats() -> anyhow::Result<()> {
+        let directory = temporary_directory("community-viewer");
+        fs::create_dir_all(directory.join("global"))?;
+        fs::write(
+            directory.join("global/communities.json"),
+            serde_json::to_vec(&json!([
+                {
+                    "id":"field-team@g.us",
+                    "title":"现场工作社群",
+                    "description":"现场协同合集",
+                    "source":"WAWebCommunityCollection"
+                },
+                {
+                    "id":"standalone@g.us",
+                    "title":"独立普通群聊",
+                    "source":"WAWebGroupMetadataCollection",
+                    "raw":{"isParentGroup":false}
+                }
+            ]))?,
+        )?;
+        fs::write(
+            directory.join("global/community-relations.json"),
+            serde_json::to_vec(&json!([
+                {
+                    "relationKind":"community_announcement_group",
+                    "fromId":"field-team@g.us",
+                    "toId":"announcements@g.us"
+                },
+                {
+                    "relationKind":"community_child_group",
+                    "fromId":"field-team@g.us",
+                    "toId":"family@g.us"
+                },
+                {
+                    "relationKind":"community_announcement_group",
+                    "fromId":"standalone@g.us",
+                    "toId":"false"
+                }
+            ]))?,
+        )?;
+        let chats = [
+            ("announcements@g.us", "公告"),
+            ("family@g.us", "家人"),
+            ("field-team@g.us", "社群内部记录"),
+            ("standalone@g.us", "独立普通群聊"),
+        ]
+        .into_iter()
+        .map(|(id, title)| ChatSummary {
+            directory: directory.join(id),
+            id: id.to_owned(),
+            title: title.to_owned(),
+            phone: None,
+            unread_count: 0,
+            last_activity: None,
+            community: None,
+        })
+        .collect::<Vec<_>>();
+
+        let mut chats = chats;
+        let index = apply_community_topology(&directory, &mut chats);
+        assert_eq!(index.communities.len(), 1);
+        assert_eq!(index.communities[0].title, "现场工作社群");
+        assert_eq!(index.communities[0].children.len(), 2);
+        assert!(index.root_chat_ids.contains("field-team@g.us"));
+        assert!(!chats.iter().any(|chat| chat.id == "field-team@g.us"));
+        let main_chat = chats.iter().find(|chat| chat.id == "announcements@g.us");
+        assert_eq!(
+            main_chat.map(|chat| chat.title.as_str()),
+            Some("现场工作社群")
+        );
+        assert_eq!(
+            main_chat
+                .and_then(|chat| chat.community.as_ref())
+                .map(|link| link.id.as_str()),
+            Some("field-team@g.us")
+        );
+        assert_eq!(
+            index.communities[0].children[0].role,
+            CommunityGroupRole::Announcement
+        );
+        assert_eq!(
+            index.by_chat_id.get("family@g.us").map(|link| link.role),
+            Some(CommunityGroupRole::Group)
+        );
+        assert!(!index.by_chat_id.contains_key("standalone@g.us"));
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn viewer_navigation_matches_whatsapp_feature_order() {
+        assert_eq!(
+            ViewerSection::ALL,
+            [
+                ViewerSection::Chats,
+                ViewerSection::Calls,
+                ViewerSection::Statuses,
+                ViewerSection::Channels,
+                ViewerSection::Communities,
+                ViewerSection::More,
+            ]
+        );
     }
 
     #[test]

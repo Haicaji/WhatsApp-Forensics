@@ -243,6 +243,7 @@ FC.createController = function createController() {
         for (const channel of channelResult.records) rememberAvatarId(channel.id);
       }
       await emitDataset("accounts", account ? [account] : []);
+      const initiallyCollectedContactCount = identities.records.length;
       await emitDataset("contacts", identities.records);
 
       const globals = FC.globalDatasets(env, {
@@ -275,7 +276,9 @@ FC.createController = function createController() {
         const chatId = FC.idString(FC.first(chat, ["id", "wid"]));
         await emit("progress", {phase: "history", chatIndex: chatIndex + 1, chatTotal: queue.length, chatId});
         const synchronized = await FC.syncChatHistory(chat, env, () => state.cancelled);
-        const chatRecord = FC.chatRecord(FC.liveChatModels(chat, env).at(-1) || chat, identities.index);
+        const liveChat = FC.liveChatModels(chat, env).at(-1) || chat;
+        await FC.ensureChatContactIdentity(liveChat, identities, env);
+        const chatRecord = FC.chatRecord(liveChat, identities.index);
         await emit("chat_begin", {index: chatIndex + 1, chatId, chat: chatRecord});
         const datasets = FC.chatDerivedDatasets(chat, synchronized.messages, env, identities.index);
         communityMessageContexts.push({chatId, messages: synchronized.messages});
@@ -319,6 +322,10 @@ FC.createController = function createController() {
         await emit("chat_end", {chatId, history: synchronized.report});
         summary.chats += 1;
         FC.absorbChats(queue, byId, env);
+      }
+
+      if (identities.records.length > initiallyCollectedContactCount) {
+        await emitDataset("contacts", identities.records.slice(initiallyCollectedContactCount));
       }
 
       const communityResult = FC.collectCommunities(env, communityMessageContexts);

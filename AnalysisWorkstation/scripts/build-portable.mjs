@@ -16,7 +16,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { pipeline } from "node:stream/promises";
 
-const VERSION = "0.1.13";
+const VERSION = "0.1.38";
 const RELEASE_NAME = `wafc-analysis-workstation-v${VERSION}-windows-x64`;
 const analysisRoot = resolve(import.meta.dirname, "..");
 const repositoryRoot = resolve(analysisRoot, "..");

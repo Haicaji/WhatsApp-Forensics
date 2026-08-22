@@ -77,6 +77,15 @@ test("current WhatsApp message keys use the $1 serialized id fallback", () => {
   );
 });
 
+test("timestamps are normalized to UTC without inheriting the collector time zone", () => {
+  const {FC} = load();
+  assert.equal(FC.timestamp({t: 1_755_651_900}), "2025-08-20T01:05:00.000Z");
+  assert.equal(FC.timestamp({t: "1755651900000"}), "2025-08-20T01:05:00.000Z");
+  assert.equal(FC.timestamp({t: "2025-08-20T09:05:00+08:00"}), "2025-08-20T01:05:00.000Z");
+  assert.equal(FC.timestamp({t: "2026-08-20 01:02:03"}), "2026-08-20T01:02:03.000Z");
+  assert.equal(FC.timestampMillis({t: "1755651900"}), 1_755_651_900_000);
+});
+
 test("phone metadata normalizes phone WIDs and keeps device identity separately", () => {
   const {FC} = load();
   const phone = FC.phoneMetadata({_serialized: "8615396599307:4@c.us", user: "8615396599307", device: 4});
@@ -144,6 +153,25 @@ test("chat and participant records use native identity links without matching na
     groupMetadata: {participants: {_models: [{id: {_serialized: "person@lid"}}]}}
   }, {}, identities.index);
   assert.equal(participants[0].phoneId, "8615880921237@c.us");
+});
+
+test("a chat-only LID resolves its phone and is added to the contact dataset", async () => {
+  const {FC} = load();
+  const identities = await FC.collectContactIdentities([], {});
+  const chat = {
+    id: {_serialized: "259567069958235@lid"},
+    formattedTitle: "JJ"
+  };
+  const record = await FC.ensureChatContactIdentity(chat, identities, {
+    contactPhoneNumber(id) {
+      assert.equal(id._serialized, "259567069958235@lid");
+      return {_serialized: "8615880921237@c.us"};
+    }
+  });
+  assert.equal(record.phoneNumber, "8615880921237");
+  assert.equal(identities.records.length, 1);
+  assert.equal(identities.index.get("259567069958235@lid").formattedPhoneNumber, "+8615880921237");
+  assert.equal(FC.chatRecord(chat, identities.index).phoneId, "8615880921237@c.us");
 });
 
 test("media payload bodies are omitted from compact message records", () => {
@@ -291,6 +319,55 @@ test("communities fall back to group metadata and observed community events", ()
   assert.ok(result.relations.some(relation =>
     relation.relationKind === "community_parent"
       && relation.fromId === childId && relation.toId === parentId));
+});
+
+test("community collection rejects boolean ids and keeps ordinary groups out of the root list", () => {
+  const {FC} = load();
+  const parentId = "parent@g.us";
+  const announcementId = "announcement@g.us";
+  const childId = "child@g.us";
+  const standaloneId = "standalone@g.us";
+  const chats = [
+    {id: {_serialized: parentId}, title: "Community"},
+    {id: {_serialized: announcementId}, title: "Announcements"},
+    {id: {_serialized: childId}, title: "Child"},
+    {id: {_serialized: standaloneId}, title: "Standalone"}
+  ];
+  const metadata = {
+    _models: [
+      {
+        id: {_serialized: parentId}, isParentGroup: true,
+        defaultSubgroup: false,
+        subgroups: [{id: {_serialized: announcementId}}, {id: {_serialized: childId}}]
+      },
+      {
+        id: {_serialized: announcementId}, isParentGroup: false,
+        defaultSubgroup: true, announce: true,
+        parentGroup: {_serialized: parentId}
+      },
+      {
+        id: {_serialized: childId}, isParentGroup: false,
+        defaultSubgroup: false, parentGroup: {_serialized: parentId}
+      },
+      {
+        id: {_serialized: standaloneId}, isParentGroup: false,
+        defaultSubgroup: false
+      }
+    ]
+  };
+
+  const result = FC.collectCommunities({chatCollection: {_models: chats}, groupMetadata: metadata});
+
+  assert.deepEqual(Array.from(result.records, record => record.id), [parentId]);
+  assert.equal(result.relations.some(relation => ["true", "false"].includes(relation.toId)), false);
+  assert.ok(result.relations.some(relation =>
+    relation.relationKind === "community_announcement_group"
+      && relation.fromId === parentId && relation.toId === announcementId));
+  assert.ok(result.relations.some(relation =>
+    relation.relationKind === "community_child_group"
+      && relation.fromId === parentId && relation.toId === childId));
+  assert.equal(result.relations.some(relation =>
+    relation.fromId === standaloneId || relation.toId === standaloneId), false);
 });
 
 test("community events alone reconstruct the visible parent and subgroup links", () => {

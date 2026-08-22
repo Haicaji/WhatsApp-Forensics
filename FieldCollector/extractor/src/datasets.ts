@@ -46,20 +46,32 @@ FC.groupIdsFrom = function groupIdsFrom(value) {
 FC.collectCommunities = function collectCommunities(env, chatMessageContexts = []) {
   const records = new Map();
   const relations = new Map();
+  const communityRootIds = new Set();
   const sources = new Set();
   const chats = FC.collectionValues(env.chatCollection);
   const chatsById = new Map(chats.map(chat => [
     FC.idString(FC.first(chat, ["id", "wid"])), chat
   ]).filter(([id]) => id));
+  const communityText = value => typeof value === "boolean" ? null : FC.textValue(value);
+  const groupIdFrom = value => FC.groupIdsFrom(value)[0] || null;
+  const rememberCommunityRoot = id => {
+    if (id && /@g\.us$/i.test(id)) communityRootIds.add(id);
+  };
   const rememberCommunity = (id, title, source, rawSource = null) => {
-    if (!id) return;
+    if (!id || !/@g\.us$/i.test(id)) return;
     const chat = chatsById.get(id);
     const metadata = chat ? FC.groupMetadataForChat(chat, env) : null;
     const existing = records.get(id);
+    const normalizedTitle = communityText(title)
+      || existing?.title
+      || communityText(FC.first(chat, ["formattedTitle", "name", "title", "subject"]))
+      || id;
     const record = {
       id,
-      title: title || existing?.title || FC.first(chat, ["formattedTitle", "name", "title"]) || id,
-      description: FC.first(metadata, ["description", "desc", "about"]) ?? existing?.description ?? null,
+      title: normalizedTitle,
+      description: communityText(FC.first(metadata, ["description", "desc", "about"]))
+        ?? existing?.description
+        ?? null,
       createdAt: FC.modelTimestampValue(metadata || chat || rawSource, [
         "creationTime", "createdAtTs", "createdAt", "t", "timestamp"
       ]),
@@ -70,7 +82,10 @@ FC.collectCommunities = function collectCommunities(env, chatMessageContexts = [
     if (source) sources.add(source);
   };
   const rememberRelation = (relationKind, fromId, toId, source, rawSource = null) => {
-    if (!fromId || !toId || fromId === toId) return;
+    if (
+      !fromId || !toId || fromId === toId
+      || !/@g\.us$/i.test(fromId) || !/@g\.us$/i.test(toId)
+    ) return;
     const id = `${fromId}:${relationKind}:${toId}`;
     if (!relations.has(id)) {
       relations.set(id, {
@@ -83,6 +98,7 @@ FC.collectCommunities = function collectCommunities(env, chatMessageContexts = [
 
   for (const model of FC.collectionValues(env.communities)) {
     const id = FC.idString(FC.first(model, ["id", "wid", "jid"]));
+    rememberCommunityRoot(id);
     rememberCommunity(
       id,
       FC.first(model, ["formattedTitle", "name", "title", "subject"]),
@@ -95,10 +111,15 @@ FC.collectCommunities = function collectCommunities(env, chatMessageContexts = [
     const chatId = FC.idString(FC.first(chat, ["id", "wid"]));
     if (!chatId || !/@g\.us$/i.test(chatId)) continue;
     const metadata = FC.groupMetadataForChat(chat, env);
-    const isCommunity = Boolean(FC.first(metadata, [
-      "isParentGroup", "isCommunity", "isCommunityParentGroup"
-    ]) || FC.first(chat, ["isCommunity", "isParentGroup"]));
+    const isCommunity = [
+      FC.read(metadata, "isParentGroup"),
+      FC.read(metadata, "isCommunity"),
+      FC.read(metadata, "isCommunityParentGroup"),
+      FC.read(chat, "isCommunity"),
+      FC.read(chat, "isParentGroup")
+    ].some(value => FC.booleanValue(value) === true);
     if (isCommunity) {
+      rememberCommunityRoot(chatId);
       rememberCommunity(
         chatId,
         FC.first(chat, ["formattedTitle", "name", "title", "subject"]),
@@ -106,17 +127,32 @@ FC.collectCommunities = function collectCommunities(env, chatMessageContexts = [
         metadata || chat
       );
     }
-    const parentId = FC.idString(FC.first(metadata, [
+    const parentId = groupIdFrom(FC.first(metadata, [
       "parentGroup", "parentGroupId", "linkedParent", "linkedParentGroup", "community", "communityId"
     ]));
     if (parentId) {
+      rememberCommunityRoot(parentId);
       rememberCommunity(parentId, null, "WAWebGroupMetadataCollection", metadata);
       rememberRelation("community_parent", chatId, parentId, "WAWebGroupMetadataCollection", metadata);
+      const isAnnouncement = [
+        FC.read(metadata, "announce"),
+        FC.read(metadata, "defaultSubgroup"),
+        FC.read(metadata, "isDefaultSubgroup"),
+        FC.read(metadata, "isAnnouncementGroup")
+      ].some(value => FC.booleanValue(value) === true);
+      rememberRelation(
+        isAnnouncement ? "community_announcement_group" : "community_child_group",
+        parentId,
+        chatId,
+        "WAWebGroupMetadataCollection",
+        metadata
+      );
     }
-    const defaultId = FC.idString(FC.first(metadata, [
-      "defaultSubgroup", "defaultSubgroupId", "announcementGroup", "announcementGroupId"
+    const defaultId = groupIdFrom(FC.first(metadata, [
+      "defaultSubgroupId", "announcementGroup", "announcementGroupId"
     ]));
     if (defaultId) {
+      rememberCommunityRoot(chatId);
       rememberCommunity(chatId, null, "WAWebGroupMetadataCollection", metadata);
       rememberRelation(
         "community_announcement_group", chatId, defaultId,
@@ -125,6 +161,7 @@ FC.collectCommunities = function collectCommunities(env, chatMessageContexts = [
     }
     for (const key of ["joinedSubgroups", "subgroups", "childGroups", "communitySubgroups", "linkedGroups"]) {
       for (const childId of FC.groupIdsFrom(FC.read(metadata, key))) {
+        rememberCommunityRoot(chatId);
         rememberCommunity(chatId, null, "WAWebGroupMetadataCollection", metadata);
         rememberRelation("community_child_group", chatId, childId, "WAWebGroupMetadataCollection", metadata);
       }
@@ -144,6 +181,7 @@ FC.collectCommunities = function collectCommunities(env, chatMessageContexts = [
         const communityId = groupIds[0];
         const title = FC.textValue(FC.first(message, ["body", "subject", "name", "title"]));
         announcementParents.set(chatId, communityId);
+        rememberCommunityRoot(communityId);
         rememberCommunity(communityId, title, "WAWebChatCollection.community_events", message);
         rememberRelation(
           "community_announcement_group", communityId, chatId,
@@ -154,12 +192,14 @@ FC.collectCommunities = function collectCommunities(env, chatMessageContexts = [
   }
   for (const {chatId, message, subtype, groupIds} of eventEntries) {
     if (subtype === "empty_subgroup_create" && groupIds[0]) {
+      rememberCommunityRoot(groupIds[0]);
       rememberCommunity(groupIds[0], null, "WAWebChatCollection.community_events", message);
       rememberRelation(
         "community_child_group", groupIds[0], chatId,
         "WAWebChatCollection.community_events", message
       );
     } else if (subtype === "sub_group_link") {
+      rememberCommunityRoot(chatId);
       rememberCommunity(chatId, null, "WAWebChatCollection.community_events", message);
       for (const childId of groupIds) {
         rememberRelation(
@@ -187,7 +227,9 @@ FC.collectCommunities = function collectCommunities(env, chatMessageContexts = [
     status: hasStructuredSource || hasObservedEvents ? "supported" : "unavailable",
     reason: hasStructuredSource ? null : hasObservedEvents ? "derived_from_community_events" : "community_sources_unavailable",
     source: Array.from(sources).join("+") || null,
-    records: Array.from(records.values()).sort((left, right) => left.id.localeCompare(right.id)),
+    records: Array.from(records.values())
+      .filter(record => communityRootIds.has(record.id))
+      .sort((left, right) => left.id.localeCompare(right.id)),
     relations: Array.from(relations.values()).sort((left, right) => left.id.localeCompare(right.id))
   };
 };

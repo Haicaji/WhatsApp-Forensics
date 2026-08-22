@@ -211,20 +211,25 @@ FC.rawSnapshot = function rawSnapshot(model, options = {}) {
 FC.timestamp = function timestamp(model) {
   const value = FC.first(model, ["t", "timestamp", "ts", "createdAt", "lastUpdatedAt"]);
   if (value == null) return null;
-  if (typeof value === "number") {
-    const millis = value < 10_000_000_000 ? value * 1000 : value;
+  const text = typeof value === "string" ? value.trim() : String(value);
+  if (text === "") return null;
+  const numeric = typeof value === "number" || /^[+-]?\d+(?:\.\d+)?$/.test(text)
+    ? Number(value)
+    : Number.NaN;
+  if (Number.isFinite(numeric)) {
+    const millis = Math.abs(numeric) < 10_000_000_000 ? numeric * 1000 : numeric;
     const date = new Date(millis);
-    return Number.isNaN(date.getTime()) ? String(value) : date.toISOString();
+    return Number.isNaN(date.getTime()) ? text : date.toISOString();
   }
-  return String(value);
+  const withoutTimeZone = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?$/.test(text);
+  const parseable = withoutTimeZone ? `${text.replace(" ", "T")}Z` : text;
+  const date = new Date(parseable);
+  return Number.isNaN(date.getTime()) ? text : date.toISOString();
 };
 
 FC.timestampMillis = function timestampMillis(model) {
-  const value = FC.first(model, ["t", "timestamp", "ts", "createdAt", "lastUpdatedAt"]);
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value < 10_000_000_000 ? value * 1000 : value;
-  }
-  const parsed = Date.parse(String(value || ""));
+  const normalized = FC.timestamp(model);
+  const parsed = Date.parse(String(normalized || ""));
   return Number.isFinite(parsed) ? parsed : null;
 };
 
@@ -242,6 +247,21 @@ FC.textValue = function textValue(value) {
   }
   const nested = FC.first(value, ["text", "body", "about", "status", "value"]);
   if (nested !== undefined && nested !== value) return FC.textValue(nested);
+  return null;
+};
+
+FC.booleanValue = function booleanValue(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (value === 1) return true;
+    if (value === 0) return false;
+    return null;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true" || normalized === "1") return true;
+    if (normalized === "false" || normalized === "0") return false;
+  }
   return null;
 };
 
@@ -426,6 +446,40 @@ FC.collectContactIdentities = async function collectContactIdentities(contacts, 
     }
   }
   return {records: compactRecords, index};
+};
+
+FC.ensureChatContactIdentity = async function ensureChatContactIdentity(model, identities, env = {}) {
+  const id = FC.idString(FC.first(model, ["id", "wid"])) || null;
+  const isGroup = Boolean(FC.read(model, "isGroup") || id?.endsWith("@g.us"));
+  if (isGroup || !id || !identities?.index || !Array.isArray(identities.records)) return null;
+  const contactModel = FC.first(model, ["contact", "peer", "contactModel"]);
+  const contactId = FC.idString(FC.first(contactModel, ["id", "wid"])) || id;
+  const existing = identities.index.get(contactId) || identities.index.get(id) || null;
+  if (existing?.phoneId) return existing;
+
+  const resolutionModel = contactModel || {id: FC.first(model, ["id", "wid"]) || id};
+  const identity = await FC.resolveContactIdentity(resolutionModel, env);
+  if (!identity.phoneId) return existing;
+  const resolved = FC.contactRecord(resolutionModel, identity);
+  const record = existing ? {
+    ...resolved,
+    ...existing,
+    lidId: identity.lidId || existing.lidId || null,
+    phoneId: identity.phoneId,
+    phoneNumber: identity.phoneNumber,
+    formattedPhoneNumber: identity.formattedPhoneNumber,
+    deviceId: identity.deviceId,
+    devicePhoneId: identity.devicePhoneId,
+    phoneResolution: "resolved",
+    phoneSource: identity.phoneSource
+  } : resolved;
+  const recordIndex = identities.records.findIndex(item => item === existing || item.id === record.id);
+  if (recordIndex >= 0) identities.records[recordIndex] = record;
+  else identities.records.push(record);
+  for (const alias of [id, contactId, record.id, record.lidId, record.phoneId, record.devicePhoneId]) {
+    if (alias) identities.index.set(alias, record);
+  }
+  return record;
 };
 
 FC.accountRecord = async function accountRecord(contacts, identities, env = {}) {

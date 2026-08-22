@@ -8,9 +8,11 @@ import type {
   EvidenceSource,
   MessageQuery,
   MessageView,
+  OfflinePreviewExportResult,
   ReceiveInput,
   ReceiveResult,
   SettingsInfo,
+  SourceWorkspaceView,
   TaskSummary,
 } from "@wafc/domain";
 
@@ -52,8 +54,13 @@ export interface ResultsApi {
 
 export interface RepositoryApi {
   sources(caseId: string): Promise<ApiResult<EvidenceSource[]>>;
+  sourceWorkspace(caseId: string, sourceId: string): Promise<ApiResult<SourceWorkspaceView>>;
   chats(caseId: string, query: ChatQuery): Promise<ApiResult<CursorPage<ChatSummary>>>;
   messages(caseId: string, query: MessageQuery): Promise<ApiResult<CursorPage<MessageView>>>;
+  exportOfflinePreview(
+    caseId: string,
+    sourceId: string,
+  ): Promise<ApiResult<OfflinePreviewExportResult | null>>;
 }
 
 export interface AttachmentsApi {
@@ -91,8 +98,10 @@ export const IPC_CHANNELS = {
   resultsChoose: "wafc:results:choose",
   resultsReceive: "wafc:results:receive",
   repositorySources: "wafc:repository:sources",
+  repositorySourceWorkspace: "wafc:repository:source-workspace",
   repositoryChats: "wafc:repository:chats",
   repositoryMessages: "wafc:repository:messages",
+  repositoryExportOfflinePreview: "wafc:repository:export-offline-preview",
   attachmentsOpen: "wafc:attachments:open",
   windowMinimize: "wafc:window:minimize",
   windowToggleMaximize: "wafc:window:toggle-maximize",

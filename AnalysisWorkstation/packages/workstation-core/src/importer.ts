@@ -31,6 +31,7 @@ import {
   walkSafeFiles,
 } from "./safe-files.js";
 import { assertPathInside, isPathInside, toPortableRelativePath } from "./paths.js";
+import { normalizeEvidenceTimestamp } from "./timestamps.js";
 
 const MAX_JSON_BYTES = 128 * 1024 * 1024;
 const REQUIRED_MESSAGE_HEADERS = [
@@ -79,6 +80,17 @@ const manifestSchema = z.discriminatedUnion("schemaVersion", [
 type SessionManifest = z.infer<typeof manifestSchema>;
 type CsvRow = Record<string, string>;
 type JsonObject = Record<string, unknown>;
+
+type ContactDirectoryEntry = {
+  displayName: string | null;
+  phoneNumber: string | null;
+  formattedPhoneNumber: string | null;
+};
+
+type ContactDirectory = {
+  byId: Map<string, ContactDirectoryEntry>;
+  names: Map<string, string>;
+};
 
 type MediaIndexRecord = {
   messageId: string;
@@ -203,8 +215,8 @@ export class ResultImporter {
         importFingerprint: fingerprint,
         rawRelativePath,
         importedAtUtc: new Date().toISOString(),
-        startedAtUtc: manifest.startedAt ?? null,
-        finishedAtUtc: manifest.finishedAt ?? null,
+        startedAtUtc: normalizeEvidenceTimestamp(manifest.startedAt),
+        finishedAtUtc: normalizeEvidenceTimestamp(manifest.finishedAt),
         warning,
       });
       await parseSessionIntoRepository(stagingRawRoot, sourceId, chatDirectoriesFromCopy(
@@ -418,11 +430,15 @@ async function parseSessionIntoRepository(
   chatDirectories: readonly string[],
   transaction: SessionImportTransaction,
 ): Promise<void> {
-  const contacts = await readContactNames(join(sessionRoot, "contacts.csv"));
+  const contacts = await readContactDirectory(join(sessionRoot, "contacts.csv"));
   for (const chatDirectory of chatDirectories) {
     const chat = readJsonObject(join(chatDirectory, "chat.json"));
     const nativeId = String(chat.id);
     const title = firstText(chat.title, chat.contactName, chat.formattedPhoneNumber, nativeId);
+    const contact = [chat.contactId, chat.lidId, chat.phoneId, nativeId]
+      .map((value) => typeof value === "string" ? contacts.byId.get(value.trim()) : undefined)
+      .find((value) => value !== undefined);
+    const phone = phoneIdentityFromRecord(chat);
     const kind = typeof chat.kind === "string"
       ? chat.kind
       : chat.isGroup === true
@@ -433,6 +449,9 @@ async function parseSessionIntoRepository(
       sourceId,
       nativeId,
       title,
+      phoneNumber: phone.phoneNumber ?? contact?.phoneNumber ?? null,
+      formattedPhoneNumber:
+        phone.formattedPhoneNumber ?? contact?.formattedPhoneNumber ?? null,
       kind,
       participantCount,
     });
@@ -442,17 +461,18 @@ async function parseSessionIntoRepository(
       sourceId,
       nativeId,
       sessionRoot,
-      contacts,
+      contacts.names,
       mediaByMessage,
       transaction,
     );
   }
 }
 
-async function readContactNames(path: string): Promise<Map<string, string>> {
+async function readContactDirectory(path: string): Promise<ContactDirectory> {
+  const byId = new Map<string, ContactDirectoryEntry>();
   const names = new Map<string, string>();
-  if (!existsSync(path)) return names;
-  await parseCsv(path, ["id", "displayName"], (row) => {
+  if (!existsSync(path)) return { byId, names };
+  await parseCsv(path, ["id"], (row) => {
     const displayName = firstTextOrNull(
       row.displayName,
       row.savedName,
@@ -460,12 +480,56 @@ async function readContactNames(path: string): Promise<Map<string, string>> {
       row.name,
       row.formattedPhoneNumber,
     );
-    if (displayName === null) return;
-    for (const id of [row.id, row.lidId, row.phoneId]) {
-      if (id?.trim()) names.set(id, displayName);
+    const phone = phoneIdentityFromRecord(row);
+    const aliases = [row.id, row.lidId, row.phoneId, row.devicePhoneId]
+      .map((value) => value?.trim() ?? "")
+      .filter((value) => value !== "");
+    const existing = aliases.map((id) => byId.get(id)).find((entry) => entry !== undefined);
+    const entry: ContactDirectoryEntry = {
+      displayName: existing?.displayName ?? displayName,
+      phoneNumber: existing?.phoneNumber ?? phone.phoneNumber,
+      formattedPhoneNumber:
+        existing?.formattedPhoneNumber ?? phone.formattedPhoneNumber,
+    };
+    for (const id of aliases) {
+      byId.set(id, entry);
+      if (entry.displayName !== null) names.set(id, entry.displayName);
     }
   });
-  return names;
+  return { byId, names };
+}
+
+function phoneIdentityFromRecord(record: Record<string, unknown>): {
+  phoneNumber: string | null;
+  formattedPhoneNumber: string | null;
+} {
+  const phoneNumber = [
+    record.phoneNumber,
+    record.phoneId,
+    record.devicePhoneId,
+    record.formattedPhoneNumber,
+    record.id,
+  ].map(phoneDigits).find((value) => value !== null) ?? null;
+  if (phoneNumber === null) {
+    return { phoneNumber: null, formattedPhoneNumber: null };
+  }
+  const formattedCandidate = typeof record.formattedPhoneNumber === "string"
+    ? record.formattedPhoneNumber.trim()
+    : "";
+  const formattedPhoneNumber = phoneDigits(formattedCandidate) === phoneNumber
+    ? formattedCandidate
+    : `+${phoneNumber}`;
+  return { phoneNumber, formattedPhoneNumber };
+}
+
+function phoneDigits(value: unknown): string | null {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const text = String(value).trim();
+  const wid = text.match(/^(\+?\d{7,15})(?:(?::|_)\d+)?@(?:c\.us|s\.whatsapp\.net)$/iu);
+  if (wid?.[1]) return wid[1].replace(/^\+/u, "");
+  if (text.includes("@") || !/^[+\d\s().-]+$/u.test(text)) return null;
+  const digits = text.replace(/\D/gu, "");
+  return /^\d{7,15}$/u.test(digits) ? digits : null;
 }
 
 async function countCsvRecords(path: string): Promise<number> {
@@ -666,16 +730,7 @@ function parseNullableInteger(value: string | undefined): number | null {
 }
 
 function normalizeTimestamp(value: string | undefined): string | null {
-  const text = value?.trim() ?? "";
-  if (text === "") return null;
-  const numeric = Number(text);
-  if (Number.isFinite(numeric)) {
-    const milliseconds = numeric < 10_000_000_000 ? numeric * 1000 : numeric;
-    const date = new Date(milliseconds);
-    if (!Number.isNaN(date.valueOf())) return date.toISOString();
-  }
-  const date = new Date(text);
-  return Number.isNaN(date.valueOf()) ? text : date.toISOString();
+  return normalizeEvidenceTimestamp(value);
 }
 
 function attachmentKind(

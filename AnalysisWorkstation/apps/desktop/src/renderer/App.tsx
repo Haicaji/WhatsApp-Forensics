@@ -35,6 +35,13 @@ export function App(): React.JSX.Element {
     setRoute("case");
   }, [activeCase]);
 
+  const toggleSettings = useCallback((): void => {
+    setRoute((currentRoute) => {
+      if (currentRoute !== "settings") return "settings";
+      return activeCase === null ? "cases" : "case";
+    });
+  }, [activeCase]);
+
   return (
     <div className="app-root">
       <TitleBar />
@@ -43,9 +50,9 @@ export function App(): React.JSX.Element {
           caseOpen={activeCase !== null}
           activeSection={caseSection}
           settingsActive={route === "settings"}
-          onHome={goHome}
+          onExitCase={goHome}
           onSection={chooseSection}
-          onSettings={() => setRoute("settings")}
+          onSettings={toggleSettings}
         />
         <main className="workspace">
           {route === "cases" ? (

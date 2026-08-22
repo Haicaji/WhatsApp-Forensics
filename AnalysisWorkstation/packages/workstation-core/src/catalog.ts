@@ -96,6 +96,12 @@ export class CaseCatalog {
       );
   }
 
+  updatePath(caseId: string, path: string): void {
+    this.#database
+      .prepare("UPDATE cases SET path = ? WHERE case_id = ?")
+      .run(path, caseId);
+  }
+
   markOpened(caseId: string, openedAtUtc: string): void {
     this.#database
       .prepare(`

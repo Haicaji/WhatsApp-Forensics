@@ -1,7 +1,7 @@
 import {
   ChatCircleDots,
   GearSix,
-  ShieldCheck,
+  SignOut,
   Tray,
 } from "@phosphor-icons/react";
 
@@ -11,7 +11,7 @@ type NavigationRailProps = {
   caseOpen: boolean;
   activeSection: CaseSection;
   settingsActive: boolean;
-  onHome: () => void;
+  onExitCase: () => void;
   onSection: (section: CaseSection) => void;
   onSettings: () => void;
 };
@@ -20,26 +20,16 @@ export function NavigationRail({
   caseOpen,
   activeSection,
   settingsActive,
-  onHome,
+  onExitCase,
   onSection,
   onSettings,
 }: NavigationRailProps): React.JSX.Element {
   return (
     <nav className="navigation-rail" aria-label="主要功能">
-      <button
-        type="button"
-        className="navigation-rail__logo"
-        aria-label="返回案件管理"
-        title="案件管理"
-        onClick={onHome}
-      >
-        <ShieldCheck size={31} weight="fill" />
-      </button>
       {caseOpen ? (
         <div className="navigation-rail__primary">
-          <span className="navigation-rail__separator" aria-hidden="true" />
           <RailButton
-            label="任务"
+            label="勘察"
             active={!settingsActive && activeSection === "tasks"}
             onClick={() => onSection("tasks")}
           >
@@ -47,7 +37,7 @@ export function NavigationRail({
           </RailButton>
           <span className="navigation-rail__separator" aria-hidden="true" />
           <RailButton
-            label="聊天"
+            label="预览"
             active={!settingsActive && activeSection === "chats"}
             onClick={() => onSection("chats")}
           >
@@ -58,9 +48,16 @@ export function NavigationRail({
           </RailButton>
         </div>
       ) : <div className="navigation-rail__primary" />}
-      <RailButton label="设置" showLabel={false} active={settingsActive} onClick={onSettings}>
-        <GearSix size={23} weight={settingsActive ? "fill" : "regular"} />
-      </RailButton>
+      <div className="navigation-rail__footer">
+        {caseOpen ? (
+          <RailButton label="退出案件" showLabel={false} active={false} onClick={onExitCase}>
+            <SignOut size={23} weight="regular" />
+          </RailButton>
+        ) : null}
+        <RailButton label="设置" showLabel={false} active={settingsActive} onClick={onSettings}>
+          <GearSix size={23} weight={settingsActive ? "fill" : "regular"} />
+        </RailButton>
+      </div>
     </nav>
   );
 }

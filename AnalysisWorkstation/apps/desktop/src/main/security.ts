@@ -1,6 +1,3 @@
-import { createReadStream, statSync } from "node:fs";
-import { Readable } from "node:stream";
-
 import {
   BrowserWindow,
   protocol,
@@ -9,7 +6,7 @@ import {
 
 import type { WorkstationService } from "@wafc/workstation-core";
 
-import { parseRange } from "./range.js";
+import { createAssetResponse } from "./asset-response.js";
 
 export const MEDIA_SCHEME = "wafc-media";
 
@@ -42,35 +39,13 @@ export function registerMediaProtocol(service: WorkstationService): void {
       }
       const opaqueId = url.pathname.slice(1);
       const asset = service.resolveAssetAcrossCases(opaqueId);
-      return assetResponse(request, asset.path, asset.mimeType);
-    } catch {
+      return createAssetResponse(request, asset.path, asset.mimeType);
+    } catch (error) {
+      console.error(
+        "Media protocol request failed.",
+        error instanceof Error ? error.message : String(error),
+      );
       return new Response("Not found", { status: 404 });
     }
   });
-}
-
-function assetResponse(
-  request: Request,
-  path: string,
-  mimeType: string | null,
-): Response {
-  const size = statSync(path).size;
-  const rangeHeader = request.headers.get("range");
-  const range = parseRange(rangeHeader, size);
-  const headers = new Headers({
-    "Accept-Ranges": "bytes",
-    "Cache-Control": "no-store",
-    "Content-Type": mimeType ?? "application/octet-stream",
-  });
-  if (range === null) {
-    headers.set("Content-Length", String(size));
-    if (request.method === "HEAD") return new Response(null, { status: 200, headers });
-    const stream = Readable.toWeb(createReadStream(path));
-    return new Response(stream as BodyInit, { status: 200, headers });
-  }
-  headers.set("Content-Length", String(range.end - range.start + 1));
-  headers.set("Content-Range", `bytes ${range.start}-${range.end}/${size}`);
-  if (request.method === "HEAD") return new Response(null, { status: 206, headers });
-  const stream = Readable.toWeb(createReadStream(path, range));
-  return new Response(stream as BodyInit, { status: 206, headers });
 }

@@ -156,16 +156,10 @@ export function TaskPage({ activeCase }: { activeCase: CaseSummary }): React.JSX
       {disableTarget === null ? null : (
         <Modal
           title="停用任务"
-          description="停用是单向操作，不会删除 U 盘内容，也不会远程关闭采集端。"
           onClose={() => setDisableTarget(null)}
           width="small"
         >
-          <div className="confirm-content">
-            <div className="confirm-content__icon"><Prohibit size={28} weight="duotone" /></div>
-            <p>确认停用“{disableTarget.taskName}”？之后的新 v6 结果将被拒绝。</p>
-          </div>
-          <div className="modal__actions">
-            <button type="button" className="ghost-button" onClick={() => setDisableTarget(null)}>取消</button>
+          <div className="modal__actions modal__actions--standalone">
             <button type="button" className="danger-button" onClick={() => void disable(disableTarget)}>确认停用</button>
           </div>
         </Modal>

@@ -14,6 +14,7 @@ import type {
 import type {
   AssetLocation,
   CaseManifest,
+  ChatPhoneIdentity,
   NewAttachmentRecord,
   NewChatRecord,
   NewMessageRecord,
@@ -69,6 +70,8 @@ CREATE TABLE IF NOT EXISTS chats (
   source_id TEXT NOT NULL,
   native_id TEXT NOT NULL,
   title TEXT NOT NULL,
+  phone_number TEXT,
+  formatted_phone_number TEXT,
   kind TEXT NOT NULL,
   participant_count INTEGER NOT NULL DEFAULT 0,
   message_count INTEGER NOT NULL DEFAULT 0,
@@ -135,6 +138,16 @@ function asNumber(value: unknown): number {
 
 function asBoolean(value: unknown): boolean {
   return asNumber(value) === 1;
+}
+
+function ensureColumn(
+  database: DatabaseSync,
+  table: "chats",
+  column: "phone_number" | "formatted_phone_number",
+): void {
+  const columns = database.prepare(`PRAGMA table_info(${table})`).all() as SqlRow[];
+  if (columns.some((row) => asString(row.name) === column)) return;
+  database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`);
 }
 
 function sourceFromRow(row: SqlRow): EvidenceSource {
@@ -231,8 +244,9 @@ export class SessionImportTransaction {
       throw error;
     }
     this.#insertChat = database.prepare(`
-      INSERT INTO chats (source_id, native_id, title, kind, participant_count)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO chats (
+        source_id, native_id, title, phone_number, formatted_phone_number, kind, participant_count
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
     this.#insertMessage = database.prepare(`
       INSERT INTO messages (
@@ -257,6 +271,8 @@ export class SessionImportTransaction {
       chat.sourceId,
       chat.nativeId,
       chat.title,
+      chat.phoneNumber,
+      chat.formattedPhoneNumber,
       chat.kind,
       chat.participantCount,
     );
@@ -368,6 +384,8 @@ export class CaseRepository {
   constructor(databasePath: string) {
     this.#database = new DatabaseSync(databasePath);
     this.#database.exec(SCHEMA);
+    ensureColumn(this.#database, "chats", "phone_number");
+    ensureColumn(this.#database, "chats", "formatted_phone_number");
   }
 
   close(): void {
@@ -483,12 +501,64 @@ export class CaseRepository {
     return row ? sourceFromRow(row) : null;
   }
 
+  getSourceRawRelativePath(sourceId: string): string | null {
+    const row = this.#database
+      .prepare("SELECT raw_relative_path FROM sources WHERE source_id = ?")
+      .get(sourceId) as SqlRow | undefined;
+    return row ? asString(row.raw_relative_path) : null;
+  }
+
+  backfillChatPhoneIdentities(
+    sourceId: string,
+    identities: readonly ChatPhoneIdentity[],
+  ): void {
+    if (identities.length === 0) return;
+    const statement = this.#database.prepare(`
+      UPDATE chats
+      SET
+        phone_number = COALESCE(phone_number, ?),
+        formatted_phone_number = COALESCE(formatted_phone_number, ?)
+      WHERE source_id = ? AND native_id = ?
+    `);
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      for (const identity of identities) {
+        if (identity.phoneNumber === null && identity.formattedPhoneNumber === null) continue;
+        statement.run(
+          identity.phoneNumber,
+          identity.formattedPhoneNumber,
+          sourceId,
+          identity.nativeId,
+        );
+      }
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   listChats(query: ChatQuery): CursorPage<ChatSummary> {
     const offset = Math.max(0, Number.parseInt(query.cursor ?? "0", 10) || 0);
     const search = `%${query.search.replaceAll("%", "\\%").replaceAll("_", "\\_")}%`;
     const rows = this.#database
       .prepare(`
-        SELECT * FROM chats
+        SELECT chats.*,
+          (
+            SELECT COUNT(*) FROM attachments
+            JOIN messages
+              ON messages.source_id = attachments.source_id
+             AND messages.native_id = attachments.message_native_id
+            WHERE messages.source_id = chats.source_id
+              AND messages.chat_native_id = chats.native_id
+          ) AS media_count,
+          (
+            SELECT COUNT(*) FROM messages
+            WHERE messages.source_id = chats.source_id
+              AND messages.chat_native_id = chats.native_id
+              AND messages.is_starred = 1
+          ) AS starred_message_count
+        FROM chats
         WHERE source_id = ? AND title LIKE ? ESCAPE '\\'
         ORDER BY COALESCE(last_message_at_utc, '') DESC, title COLLATE NOCASE
         LIMIT ? OFFSET ?
@@ -501,11 +571,17 @@ export class CaseRepository {
         sourceId: asString(row.source_id),
         nativeId: asString(row.native_id),
         title: asString(row.title),
+        phoneNumber: nullableString(row.phone_number),
+        formattedPhoneNumber: nullableString(row.formatted_phone_number),
+        avatarUrl: null,
         kind: asString(row.kind),
         participantCount: asNumber(row.participant_count),
         messageCount: asNumber(row.message_count),
+        mediaCount: asNumber(row.media_count),
+        starredMessageCount: asNumber(row.starred_message_count),
         lastMessageAtUtc: nullableString(row.last_message_at_utc),
         lastMessagePreview: nullableString(row.last_message_preview),
+        community: null,
       })),
       nextCursor: hasMore ? String(offset + query.limit) : null,
     };

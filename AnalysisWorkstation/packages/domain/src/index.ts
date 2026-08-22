@@ -104,14 +104,132 @@ export const chatSummarySchema = z.object({
   sourceId: uuidSchema,
   nativeId: z.string().min(1),
   title: z.string().min(1),
+  phoneNumber: z.string().nullable(),
+  formattedPhoneNumber: z.string().nullable(),
+  avatarUrl: z.string().nullable(),
   kind: z.string(),
   participantCount: z.number().int().nonnegative(),
   messageCount: z.number().int().nonnegative(),
+  mediaCount: z.number().int().nonnegative(),
+  starredMessageCount: z.number().int().nonnegative(),
   lastMessageAtUtc: z.string().nullable(),
   lastMessagePreview: z.string().nullable(),
+  community: z.object({
+    id: z.string().min(1),
+    title: z.string().min(1),
+    avatarUrl: z.string().nullable(),
+    role: z.enum(["announcement", "group"]),
+  }).nullable(),
 });
 
 export type ChatSummary = z.infer<typeof chatSummarySchema>;
+
+export const sourceFeatureAvailabilitySchema = z.object({
+  status: z.enum(["available", "empty", "unavailable", "error"]),
+  reason: z.string().nullable(),
+  truncated: z.boolean(),
+});
+
+export type SourceFeatureAvailability = z.infer<typeof sourceFeatureAvailabilitySchema>;
+
+export const sourceAccountViewSchema = z.object({
+  nativeId: z.string().nullable(),
+  displayName: z.string().nullable(),
+  about: z.string().nullable(),
+  formattedPhoneNumber: z.string().nullable(),
+});
+
+export type SourceAccountView = z.infer<typeof sourceAccountViewSchema>;
+
+export const callEvidenceViewSchema = z.object({
+  id: z.string().min(1),
+  peerId: z.string().nullable(),
+  title: z.string().min(1),
+  timestampUtc: z.string().nullable(),
+  durationSeconds: z.number().nonnegative().nullable(),
+  direction: z.enum(["incoming", "outgoing", "unknown"]),
+  isVideo: z.boolean(),
+  isGroup: z.boolean(),
+  state: z.string().nullable(),
+});
+
+export type CallEvidenceView = z.infer<typeof callEvidenceViewSchema>;
+
+export const statusEvidenceViewSchema = z.object({
+  id: z.string().min(1),
+  contactId: z.string().nullable(),
+  title: z.string().min(1),
+  timestampUtc: z.string().nullable(),
+  expiresAtUtc: z.string().nullable(),
+  itemCount: z.number().int().nonnegative(),
+  preview: z.string().nullable(),
+});
+
+export type StatusEvidenceView = z.infer<typeof statusEvidenceViewSchema>;
+
+export const channelMessageViewSchema = z.object({
+  id: z.string().min(1),
+  timestampUtc: z.string().nullable(),
+  senderId: z.string().nullable(),
+  type: z.string().min(1),
+  text: z.string().nullable(),
+  caption: z.string().nullable(),
+  isForwarded: z.boolean(),
+  isStarred: z.boolean(),
+  isRevoked: z.boolean(),
+  attachments: z.array(z.lazy(() => attachmentViewSchema)),
+});
+
+export type ChannelMessageView = z.infer<typeof channelMessageViewSchema>;
+
+export const channelEvidenceViewSchema = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  avatarUrl: z.string().nullable(),
+  description: z.string().nullable(),
+  subscribersCount: z.number().nonnegative().nullable(),
+  unreadCount: z.number().int().nonnegative(),
+  eventCount: z.number().int().nonnegative(),
+  lastEventAtUtc: z.string().nullable(),
+  lastEventPreview: z.string().nullable(),
+  historyComplete: z.boolean().nullable(),
+  messages: z.array(channelMessageViewSchema),
+  messagesTruncated: z.boolean(),
+});
+
+export type ChannelEvidenceView = z.infer<typeof channelEvidenceViewSchema>;
+
+export const communityEvidenceViewSchema = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  description: z.string().nullable(),
+  createdAtUtc: z.string().nullable(),
+  childGroups: z.array(z.object({
+    id: z.string().min(1),
+    title: z.string().min(1),
+    role: z.enum(["announcement", "group"]),
+  })),
+});
+
+export type CommunityEvidenceView = z.infer<typeof communityEvidenceViewSchema>;
+
+export const sourceWorkspaceViewSchema = z.object({
+  sourceId: uuidSchema,
+  visibleChatCount: z.number().int().nonnegative(),
+  account: sourceAccountViewSchema,
+  calls: z.array(callEvidenceViewSchema),
+  statuses: z.array(statusEvidenceViewSchema),
+  channels: z.array(channelEvidenceViewSchema),
+  communities: z.array(communityEvidenceViewSchema),
+  availability: z.object({
+    calls: sourceFeatureAvailabilitySchema,
+    statuses: sourceFeatureAvailabilitySchema,
+    channels: sourceFeatureAvailabilitySchema,
+    communities: sourceFeatureAvailabilitySchema,
+  }),
+});
+
+export type SourceWorkspaceView = z.infer<typeof sourceWorkspaceViewSchema>;
 
 export const attachmentKindSchema = z.enum([
   "image",
@@ -177,6 +295,22 @@ export const messageQuerySchema = z.object({
 });
 
 export type MessageQuery = z.infer<typeof messageQuerySchema>;
+
+export const offlinePreviewExportInputSchema = z.object({
+  caseId: uuidSchema,
+  sourceId: uuidSchema,
+  targetPath: z.string().trim().min(1, "请选择离线预览保存位置"),
+});
+
+export type OfflinePreviewExportInput = z.infer<typeof offlinePreviewExportInputSchema>;
+
+export const offlinePreviewExportResultSchema = z.object({
+  path: z.string().min(1),
+  fileName: z.string().min(1),
+  sizeBytes: z.number().int().nonnegative(),
+});
+
+export type OfflinePreviewExportResult = z.infer<typeof offlinePreviewExportResultSchema>;
 
 export const receiveResultSchema = z.object({
   sessionPath: z.string(),

@@ -30,8 +30,18 @@ const api: WorkstationApi = {
   },
   repository: {
     sources: (caseId) => invoke(IPC_CHANNELS.repositorySources, caseId),
+    sourceWorkspace: (caseId, sourceId) => invoke(
+      IPC_CHANNELS.repositorySourceWorkspace,
+      caseId,
+      sourceId,
+    ),
     chats: (caseId, query) => invoke(IPC_CHANNELS.repositoryChats, caseId, query),
     messages: (caseId, query) => invoke(IPC_CHANNELS.repositoryMessages, caseId, query),
+    exportOfflinePreview: (caseId, sourceId) => invoke(
+      IPC_CHANNELS.repositoryExportOfflinePreview,
+      caseId,
+      sourceId,
+    ),
   },
   attachments: {
     open: (opaqueId) => invoke(IPC_CHANNELS.attachmentsOpen, opaqueId),

@@ -23,8 +23,16 @@ export type NewChatRecord = {
   sourceId: string;
   nativeId: string;
   title: string;
+  phoneNumber: string | null;
+  formattedPhoneNumber: string | null;
   kind: string;
   participantCount: number;
+};
+
+export type ChatPhoneIdentity = {
+  nativeId: string;
+  phoneNumber: string | null;
+  formattedPhoneNumber: string | null;
 };
 
 export type NewMessageRecord = {
